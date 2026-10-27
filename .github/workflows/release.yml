@@ -1,0 +1,49 @@
+name: Release Windows Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'PixelForge AI v__VERSION__ — Windows'
+          releaseBody: 'Windows desktop build of PixelForge AI. Includes the NSIS installer and a portable .exe zip. Note: executables are unsigned — Windows SmartScreen may show a warning; choose "More info → Run anyway".'
+          releaseDraft: false
+          prerelease: false
+          args: '--target x86_64-pc-windows-msvc'
+      - name: Zip portable exe
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release/*.exe" | Where-Object { $_.Name -notlike '*-setup*' } | Select-Object -First 1
+          if (-not $exe) { $exe = Get-ChildItem "src-tauri/target/release/*.exe" | Where-Object { $_.Name -notlike '*-setup*' } | Select-Object -First 1 }
+          Write-Host "Portable exe: $($exe.FullName)"
+          Compress-Archive -Path $exe.FullName -DestinationPath "PixelForge-AI-portable-windows-x64.zip" -Force
+      - name: Upload portable zip to release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v" + (Get-Content "src-tauri/tauri.conf.json" | ConvertFrom-Json).version
+          gh release upload $tag "PixelForge-AI-portable-windows-x64.zip" --clobber --repo "$env:GITHUB_REPOSITORY"

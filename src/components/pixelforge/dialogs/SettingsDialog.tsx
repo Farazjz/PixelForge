@@ -30,6 +30,7 @@ import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { BUILTIN_PROFILE_ID, useSettingsStore } from '@/lib/pixelforge/settings-store'
+import { DESKTOP, desktopTestConnection } from '@/lib/pixelforge/desktop'
 import type { AIProfile } from '@/lib/pixelforge/types'
 import { cn } from '@/lib/utils'
 
@@ -174,6 +175,29 @@ export function SettingsDialog() {
     setTesting(true)
     setTestResult(null)
     try {
+      if (DESKTOP) {
+        // Desktop build: test the endpoint directly from the app (no server proxy).
+        const probe: AIProfile = {
+          id: 'probe',
+          name: 'probe',
+          kind: 'custom',
+          baseUrl: form.baseUrl.trim() || undefined,
+          apiKey: form.apiKey.trim() ? form.apiKey.trim() : existingKey,
+          imageModel: form.imageModel.trim() || 'probe',
+          textModel: form.textModel.trim() || undefined,
+          headers: form.headers.trim() || undefined,
+        }
+        const result = await desktopTestConnection(probe)
+        if (result.ok) {
+          setTestResult({
+            ok: true,
+            message: result.modelCount > 0 ? `Connected — ${result.modelCount} models available` : 'Connection OK',
+          })
+        } else {
+          setTestResult({ ok: false, message: result.error })
+        }
+        return
+      }
       const res = await fetch('/api/ai/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { renderCompositeToCanvas, serializeDoc } from '@/lib/pixelforge/engine'
 import { useEditorStore } from '@/lib/pixelforge/store'
+import { DESKTOP, saveToLibrary, updateLibraryEntry } from '@/lib/pixelforge/desktop'
 import type { PFDocument } from '@/lib/pixelforge/types'
 import { toast } from '@/hooks/use-toast'
 
@@ -99,19 +100,35 @@ export function CloudSaveDialog() {
     setSaving(true)
     try {
       const { doc, activeFrameId, projectId } = useEditorStore.getState()
-      const body = JSON.stringify({
+      const entry = {
         name: name.trim() || doc.name,
         width: doc.width,
         height: doc.height,
         dataJson: serializeDoc(doc),
         thumb: makeThumb(doc, activeFrameId),
-      })
+      }
+      if (DESKTOP) {
+        // Desktop build: no cloud server — persist to the local library instead.
+        if (projectId) {
+          updateLibraryEntry(projectId, entry)
+        } else {
+          saveToLibrary(entry)
+        }
+        useEditorStore.getState().setDocName(entry.name)
+        useEditorStore.getState().markSaved(projectId ?? null)
+        toast({
+          title: projectId ? 'Project updated' : 'Project saved to local library',
+          description: `${entry.name} — ${doc.width}×${doc.height}px (stored on this computer)`,
+        })
+        setOpen(false)
+        return
+      }
       const res = await fetch(
         projectId ? `/api/projects/${encodeURIComponent(projectId)}` : '/api/projects',
         {
           method: projectId ? 'PUT' : 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body,
+          body: JSON.stringify(entry),
         },
       )
       if (!res.ok) throw new Error(`Save failed (HTTP ${res.status})`)
@@ -141,9 +158,11 @@ export function CloudSaveDialog() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>Save to Cloud</DialogTitle>
+          <DialogTitle>{DESKTOP ? 'Save Project' : 'Save to Cloud'}</DialogTitle>
           <DialogDescription>
-            Stores the project (all layers &amp; frames) server-side so you can reopen it anywhere.
+            {DESKTOP
+              ? 'Stores the project (all layers & frames) in the local library on this computer so you can reopen it anytime.'
+              : 'Stores the project (all layers & frames) server-side so you can reopen it anywhere.'}
           </DialogDescription>
         </DialogHeader>
 

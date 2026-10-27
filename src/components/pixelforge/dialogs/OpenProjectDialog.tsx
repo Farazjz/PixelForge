@@ -27,6 +27,7 @@ import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { deserializeDoc } from '@/lib/pixelforge/engine'
 import { useEditorStore } from '@/lib/pixelforge/store'
+import { DESKTOP, deleteFromLibrary, getLibraryEntry, listLibrary } from '@/lib/pixelforge/desktop'
 import { toast } from '@/hooks/use-toast'
 
 interface CloudProject {
@@ -107,6 +108,20 @@ export function OpenProjectDialog() {
     setLoading(true)
     setCloudError(null)
     try {
+      if (DESKTOP) {
+        // Desktop build: no cloud server — show the local library.
+        setItems(
+          listLibrary().map((e) => ({
+            id: e.id,
+            name: e.name,
+            width: e.width,
+            height: e.height,
+            updatedAt: e.updatedAt,
+            thumb: e.thumb || null,
+          })),
+        )
+        return
+      }
       const res = await fetch('/api/projects')
       if (!res.ok) throw new Error(`Failed to load projects (HTTP ${res.status})`)
       const json: unknown = await res.json()
@@ -148,12 +163,17 @@ export function OpenProjectDialog() {
     setOpeningId(project.id)
     setCloudError(null)
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`)
-      if (!res.ok) throw new Error(`Failed to load project (HTTP ${res.status})`)
-      const json: unknown = await res.json()
-      const rec = asRecord(json)
-      const proj = asRecord(rec?.project) ?? rec
-      const dataJson = pickString(proj, 'dataJson', 'data', 'json')
+      let dataJson: string | undefined
+      if (DESKTOP) {
+        dataJson = getLibraryEntry(project.id)?.dataJson
+      } else {
+        const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`)
+        if (!res.ok) throw new Error(`Failed to load project (HTTP ${res.status})`)
+        const json: unknown = await res.json()
+        const rec = asRecord(json)
+        const proj = asRecord(rec?.project) ?? rec
+        dataJson = pickString(proj, 'dataJson', 'data', 'json')
+      }
       if (!dataJson) throw new Error('Project payload is missing pixel data.')
       const doc = deserializeDoc(dataJson)
       useEditorStore.getState().loadDoc(doc, project.id)
@@ -171,6 +191,12 @@ export function OpenProjectDialog() {
     const target = deleteTarget
     setDeleteTarget(null)
     try {
+      if (DESKTOP) {
+        deleteFromLibrary(target.id)
+        toast({ title: 'Project deleted', description: target.name })
+        void fetchProjects()
+        return
+      }
       const res = await fetch(`/api/projects/${encodeURIComponent(target.id)}`, { method: 'DELETE' })
       if (!res.ok && res.status !== 204) throw new Error(`Delete failed (HTTP ${res.status})`)
       toast({ title: 'Project deleted', description: target.name })

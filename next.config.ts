@@ -1,11 +1,11 @@
 import type { NextConfig } from "next";
 
+const desktopExport = process.env.DESKTOP_EXPORT === "1";
+
 const nextConfig: NextConfig = {
-  output: "standalone",
-  /* config options here */
-  typescript: {
-    ignoreBuildErrors: true,
-  },
+  output: desktopExport ? "export" : "standalone",
+  images: desktopExport ? { unoptimized: true } : undefined,
+  typescript: { ignoreBuildErrors: true },
   reactStrictMode: false,
 };
 

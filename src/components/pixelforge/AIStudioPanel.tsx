@@ -5,6 +5,7 @@
 // (image-to-image edit endpoint + local guided suggestions).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { DESKTOP, desktopChat, desktopGenerate } from '@/lib/pixelforge/desktop'
 import {
   AlertTriangle,
   ArrowRight,
@@ -481,32 +482,48 @@ export default function AIStudioPanel() {
     abortRef.current = controller
 
     try {
-      const res = await fetch('/api/ai/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          prompt,
-          negativePrompt,
-          width: w,
-          height: h,
-          style,
-          paletteSize: limitPalette ? paletteSize : 0,
-          transparentBg,
-          outline: darkOutline,
-          detail,
-          seed: profile.kind === 'custom' && seedStr.trim() !== '' ? clampInt(seedStr, 0, 0, Number.MAX_SAFE_INTEGER) : undefined,
-          provider: profile.kind,
-          profile: profile.kind === 'custom' ? customProfilePayload(profile) : undefined,
-        }),
-      })
-      const data: unknown = await res.json().catch(() => null)
-      if (!res.ok) {
-        const msg =
-          !!data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
-            ? (data as { error: string }).error
-            : `Generation failed (HTTP ${res.status})`
-        throw new Error(msg)
+      let data: unknown
+      if (DESKTOP) {
+        // Desktop build: call the user's own provider directly (no server).
+        data = await desktopGenerate(
+          {
+            prompt,
+            negativePrompt,
+            width: w,
+            height: h,
+            seed: profile.kind === 'custom' && seedStr.trim() !== '' ? clampInt(seedStr, 0, 0, Number.MAX_SAFE_INTEGER) : undefined,
+          },
+          profile,
+          controller.signal,
+        )
+      } else {
+        const res = await fetch('/api/ai/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            prompt,
+            negativePrompt,
+            width: w,
+            height: h,
+            style,
+            paletteSize: limitPalette ? paletteSize : 0,
+            transparentBg,
+            outline: darkOutline,
+            detail,
+            seed: profile.kind === 'custom' && seedStr.trim() !== '' ? clampInt(seedStr, 0, 0, Number.MAX_SAFE_INTEGER) : undefined,
+            provider: profile.kind,
+            profile: profile.kind === 'custom' ? customProfilePayload(profile) : undefined,
+          }),
+        })
+        data = await res.json().catch(() => null)
+        if (!res.ok) {
+          const msg =
+            !!data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+              ? (data as { error: string }).error
+              : `Generation failed (HTTP ${res.status})`
+          throw new Error(msg)
+        }
       }
       const images =
         !!data && typeof data === 'object' && 'images' in data && Array.isArray((data as { images: unknown }).images)
@@ -613,6 +630,11 @@ export default function AIStudioPanel() {
     setEditError(null)
     setEditLoading(true)
     try {
+      if (DESKTOP) {
+        throw new Error(
+          'AI image-to-image edit needs a server-side proxy and is only available in the web version. Use "Guided suggestions" below instead — it works in the desktop version with your own provider.',
+        )
+      }
       const st = useEditorStore.getState()
       const canvas = document.createElement('canvas')
       renderCompositeToCanvas(st.doc, st.activeFrameId, canvas)
@@ -705,31 +727,37 @@ export default function AIStudioPanel() {
         '. The user wants: ' +
         editInstruction +
         '. Reply ONLY with JSON: {"summary": string, "steps": string[], "colorMap": [{"from": "#RRGGBB", "to": "#RRGGBB"}]}. colorMap maps existing palette colors to replacements. Keep it terse.'
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: built }],
-          provider: profile.kind,
-          profile:
-            profile.kind === 'custom'
-              ? {
-                  baseUrl: profile.baseUrl,
-                  apiKey: profile.apiKey,
-                  textModel: profile.textModel,
-                  timeoutMs: profile.timeoutMs,
-                  maxRetries: profile.maxRetries,
-                }
-              : undefined,
-        }),
-      })
-      const data: unknown = await res.json().catch(() => null)
-      if (!res.ok) {
-        const msg =
-          !!data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
-            ? (data as { error: string }).error
-            : `Suggestions failed (HTTP ${res.status})`
-        throw new Error(msg)
+      let data: unknown
+      if (DESKTOP) {
+        // Desktop build: call the user's own provider directly (no server).
+        data = await desktopChat([{ role: 'user', content: built }], profile)
+      } else {
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: built }],
+            provider: profile.kind,
+            profile:
+              profile.kind === 'custom'
+                ? {
+                    baseUrl: profile.baseUrl,
+                    apiKey: profile.apiKey,
+                    textModel: profile.textModel,
+                    timeoutMs: profile.timeoutMs,
+                    maxRetries: profile.maxRetries,
+                  }
+                : undefined,
+          }),
+        })
+        data = await res.json().catch(() => null)
+        if (!res.ok) {
+          const msg =
+            !!data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+              ? (data as { error: string }).error
+              : `Suggestions failed (HTTP ${res.status})`
+          throw new Error(msg)
+        }
       }
       const text =
         !!data && typeof data === 'object' && 'text' in data && typeof (data as { text: unknown }).text === 'string'

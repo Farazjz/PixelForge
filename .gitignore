@@ -64,3 +64,8 @@ server.log
 /examples/
 /agent-ctx/
 /Caddyfile
+# --- Tauri / desktop build ---
+/src-tauri/target/
+/src-tauri/gen/
+/out/
+/.desktop-api-stash/
