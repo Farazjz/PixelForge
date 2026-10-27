@@ -270,8 +270,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
     resizeCanvas: (w, h, anchor = 'center') => {
       snapDoc('Resize canvas', (d) => {
         const ow = d.width, oh = d.height
-        const dx = anchor.includes('w') ? 0 : anchor.includes('e') ? w - ow : Math.floor((w - ow) / 2)
-        const dy = anchor.includes('n') ? 0 : anchor.includes('s') ? h - oh : Math.floor((h - oh) / 2)
+        // Anchor ids: *w → keep left edge, *e → keep right edge, n* → keep top edge, s* → keep bottom
+        // ('c' and 'center' fall through to centered offsets on both axes)
+        const dx = anchor.endsWith('w') ? 0 : anchor.endsWith('e') ? w - ow : Math.floor((w - ow) / 2)
+        const dy = anchor.startsWith('n') ? 0 : anchor.startsWith('s') ? h - oh : Math.floor((h - oh) / 2)
         d.width = w; d.height = h
         for (const layer of d.layers) {
           for (const fid of Object.keys(layer.cels)) {

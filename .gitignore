@@ -52,3 +52,15 @@ prompt
 server.log
 # Skills directory
 /skills/
+# --- PixelForge repo hygiene: sandbox/runtime artifacts ---
+/tool-results/
+/.verify-*
+/db/
+/.zscripts/
+/tests/
+/download/
+/mini-services/
+/upload/
+/examples/
+/agent-ctx/
+/Caddyfile

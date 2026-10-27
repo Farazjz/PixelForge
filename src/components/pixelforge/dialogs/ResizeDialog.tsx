@@ -22,8 +22,8 @@ import { toast } from '@/hooks/use-toast'
 import { cn } from '@/lib/utils'
 
 /**
- * Anchor ids intentionally avoid ambiguous substrings for the store's
- * `anchor.includes('n'|'s'|'e'|'w')` matching — 'c' is the true center.
+ * Anchor ids for the store's `endsWith('w'|'e')` / `startsWith('n'|'s')`
+ * matching — 'c' is the true center.
  */
 type AnchorId = 'nw' | 'n' | 'ne' | 'w' | 'c' | 'e' | 'sw' | 's' | 'se'
 
@@ -51,7 +51,13 @@ export function ResizeDialog() {
       setOpen(true)
     }
     window.addEventListener('pf:menu-resize', handler)
-    return () => window.removeEventListener('pf:menu-resize', handler)
+    // MenuBar ▸ Palette ▸ "Reduce Colors…" opens this dialog (it owns the
+    // color-reduction section) — same handler, see 'pf:quantize' contract.
+    window.addEventListener('pf:quantize', handler)
+    return () => {
+      window.removeEventListener('pf:menu-resize', handler)
+      window.removeEventListener('pf:quantize', handler)
+    }
   }, [])
 
   const applyResize = () => {
