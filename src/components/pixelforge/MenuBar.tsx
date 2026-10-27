@@ -11,6 +11,7 @@ import {
   FilePlus2,
   FolderOpen,
   Grid3x3,
+  ImageDown,
   Layers2,
   Maximize2,
   Moon,
@@ -163,6 +164,10 @@ export function MenuBar() {
               </MenubarItem>
               <MenubarItem onSelect={() => fire('pf:menu-open')}>
                 Open…<MenubarShortcut>Ctrl+O</MenubarShortcut>
+              </MenubarItem>
+              <MenubarItem onSelect={() => fire('pf:menu-import')}>
+                <ImageDown className="mr-2 size-4" />
+                Import Image…
               </MenubarItem>
               <MenubarItem onSelect={() => fire('pf:menu-save')}>
                 Save Project (.pfa)<MenubarShortcut>Ctrl+S</MenubarShortcut>

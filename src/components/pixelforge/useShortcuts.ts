@@ -71,8 +71,12 @@ export function useShortcuts(): void {
             s.copySelection()
             return
           case 'v':
-            e.preventDefault()
-            s.pasteClipboard()
+            if (s.clipboard) {
+              e.preventDefault()
+              s.pasteClipboard()
+            }
+            // no internal pixel clipboard → let the native paste event fire
+            // (CanvasStage listens for image pastes and opens the import flow)
             return
           case 'n':
             e.preventDefault()

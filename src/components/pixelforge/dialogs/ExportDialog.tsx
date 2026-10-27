@@ -1,10 +1,11 @@
 'use client'
 
-// PixelForge AI — Export dialog (PNG / JPEG / WebP, sprite sheets, palette JSON).
+// PixelForge AI — Export dialog (PNG / JPEG / WebP / BMP, sprite sheets,
+// animated GIF, frames-as-ZIP, palette JSON).
 // Opens on window event 'pf:menu-export'. Scaling is always nearest-neighbor.
 
 import { useEffect, useState } from 'react'
-import { ImageDown, FileJson } from 'lucide-react'
+import { ImageDown, FileJson, Loader2 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -24,12 +25,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { renderCompositeToCanvas } from '@/lib/pixelforge/engine'
+import {
+  celToCanvas,
+  compositeFrame,
+  hexToRgba,
+  nearestScale,
+  renderCompositeToCanvas,
+} from '@/lib/pixelforge/engine'
+import {
+  canvasToPngBlob,
+  encodeAnimatedGIF,
+  encodeBMP,
+  zipBlobs,
+} from '@/lib/pixelforge/export-utils'
 import { useEditorStore } from '@/lib/pixelforge/store'
 import { toast } from '@/hooks/use-toast'
 
-type Format = 'png' | 'jpeg' | 'webp'
-type Scope = 'frame' | 'sheet'
+type Format = 'png' | 'jpeg' | 'webp' | 'bmp'
+type Scope = 'frame' | 'sheet' | 'gif' | 'zip'
 
 const SCALES = [1, 2, 3, 4, 8]
 const COLUMNS = ['auto', '1', '2', '4', '8']
@@ -65,6 +78,7 @@ export function ExportDialog() {
   const [scope, setScope] = useState<Scope>('frame')
   const [columns, setColumns] = useState('auto')
   const [jpegBg, setJpegBg] = useState('#ffffff')
+  const [exporting, setExporting] = useState(false)
 
   // Reactive doc info for the preview line
   const docW = useEditorStore((s) => s.doc.width)
@@ -79,53 +93,122 @@ export function ExportDialog() {
 
   const mime = format === 'png' ? 'image/png' : format === 'jpeg' ? 'image/jpeg' : 'image/webp'
 
-  const runExport = () => {
+  const runExport = async () => {
+    if (exporting) return
     const { doc, activeFrameId } = useEditorStore.getState()
-    const src = document.createElement('canvas')
-    const out = document.createElement('canvas')
-    const octx = out.getContext('2d')
-    if (!octx) return
-    octx.imageSmoothingEnabled = false // nearest-neighbor — pixels stay crisp
+    setExporting(true)
+    try {
+      const base = sanitizeFilename(doc.name)
 
-    const base = sanitizeFilename(doc.name)
+      // ---- Animated GIF: composite every frame, NN-scale, encode looping 256-color GIF ----
+      if (scope === 'gif') {
+        const frames = doc.frames.map((frame) => {
+          const comp = compositeFrame(doc, frame.id)
+          const scaled = nearestScale(comp, doc.width, doc.height, scale)
+          return { data: scaled.data, delayMs: frame.durationMs }
+        })
+        const blob = encodeAnimatedGIF(frames, doc.width * scale, doc.height * scale)
+        downloadBlob(blob, `${base}-anim-${doc.frames.length}f.gif`)
+        toast({
+          title: 'Export complete',
+          description: `Animated GIF (${doc.frames.length} frames, looping, 256-color) exported.`,
+        })
+        return
+      }
 
-    if (scope === 'frame') {
-      renderCompositeToCanvas(doc, activeFrameId, src)
-      const frameIndex = Math.max(0, doc.frames.findIndex((f) => f.id === activeFrameId))
-      out.width = doc.width * scale
-      out.height = doc.height * scale
-      if (format === 'jpeg') {
-        octx.fillStyle = jpegBg
-        octx.fillRect(0, 0, out.width, out.height)
+      // ---- ZIP: one NN-scaled transparent PNG per frame, zipped client-side ----
+      if (scope === 'zip') {
+        const count = doc.frames.length
+        const pad = String(count).length
+        const files: { name: string; blob: Blob }[] = []
+        for (let i = 0; i < count; i++) {
+          const comp = compositeFrame(doc, doc.frames[i].id)
+          const scaled = nearestScale(comp, doc.width, doc.height, scale)
+          const canvas = celToCanvas(scaled.data, scaled.w, scaled.h)
+          files.push({
+            name: `${base}-frame-${String(i + 1).padStart(pad, '0')}.png`,
+            blob: await canvasToPngBlob(canvas),
+          })
+        }
+        downloadBlob(await zipBlobs(files), `${base}-frames-${count}f-${scale}x.zip`)
+        toast({
+          title: 'Export complete',
+          description: `${count} frame PNG${count === 1 ? '' : 's'} zipped.`,
+        })
+        return
       }
-      octx.drawImage(src, 0, 0, out.width, out.height)
-      downloadDataUrl(out.toDataURL(mime, 0.92), `${base}-frame${frameIndex + 1}-${scale}x.${format}`)
-    } else {
-      const cols = columns === 'auto' ? doc.frames.length : Number(columns)
-      const rows = Math.ceil(doc.frames.length / cols)
-      out.width = doc.width * cols * scale
-      out.height = doc.height * rows * scale
-      if (format === 'jpeg') {
-        octx.fillStyle = jpegBg
-        octx.fillRect(0, 0, out.width, out.height)
+
+      // ---- Raster scopes (current frame | sprite sheet) ----
+      const src = document.createElement('canvas')
+      const out = document.createElement('canvas')
+      const octx = out.getContext('2d')
+      if (!octx) throw new Error('Canvas 2D context unavailable')
+      octx.imageSmoothingEnabled = false // nearest-neighbor — pixels stay crisp
+
+      // BMP is flat: semi-transparent pixels blend over the chosen background.
+      const [bgR, bgG, bgB] = hexToRgba(jpegBg)
+      const bmpBg: [number, number, number] | null = format === 'bmp' ? [bgR, bgG, bgB] : null
+
+      if (scope === 'frame') {
+        renderCompositeToCanvas(doc, activeFrameId, src)
+        const frameIndex = Math.max(0, doc.frames.findIndex((f) => f.id === activeFrameId))
+        out.width = doc.width * scale
+        out.height = doc.height * scale
+        if (format === 'jpeg') {
+          octx.fillStyle = jpegBg
+          octx.fillRect(0, 0, out.width, out.height)
+        }
+        octx.drawImage(src, 0, 0, out.width, out.height)
+        const filename = `${base}-frame${frameIndex + 1}-${scale}x.${format}`
+        if (format === 'bmp') {
+          // canvas.toDataURL cannot emit BMP — read the rendered pixels back instead.
+          const px = octx.getImageData(0, 0, out.width, out.height)
+          downloadBlob(encodeBMP(px.data, out.width, out.height, bmpBg), filename)
+        } else {
+          downloadDataUrl(out.toDataURL(mime, 0.92), filename)
+        }
+      } else {
+        const cols = columns === 'auto' ? doc.frames.length : Number(columns)
+        const rows = Math.ceil(doc.frames.length / cols)
+        out.width = doc.width * cols * scale
+        out.height = doc.height * rows * scale
+        if (format === 'jpeg') {
+          octx.fillStyle = jpegBg
+          octx.fillRect(0, 0, out.width, out.height)
+        }
+        doc.frames.forEach((frame, i) => {
+          renderCompositeToCanvas(doc, frame.id, src)
+          octx.drawImage(
+            src,
+            (i % cols) * doc.width * scale,
+            Math.floor(i / cols) * doc.height * scale,
+            doc.width * scale,
+            doc.height * scale,
+          )
+        })
+        const filename = `${base}-sheet-${doc.frames.length}f-${scale}x.${format}`
+        if (format === 'bmp') {
+          const px = octx.getImageData(0, 0, out.width, out.height)
+          downloadBlob(encodeBMP(px.data, out.width, out.height, bmpBg), filename)
+        } else {
+          downloadDataUrl(out.toDataURL(mime, 0.92), filename)
+        }
       }
-      doc.frames.forEach((frame, i) => {
-        renderCompositeToCanvas(doc, frame.id, src)
-        octx.drawImage(
-          src,
-          (i % cols) * doc.width * scale,
-          Math.floor(i / cols) * doc.height * scale,
-          doc.width * scale,
-          doc.height * scale,
-        )
+
+      toast({
+        title: 'Export complete',
+        description:
+          scope === 'frame' ? 'Current frame exported.' : `Sprite sheet (${doc.frames.length} frames) exported.`,
       })
-      downloadDataUrl(out.toDataURL(mime, 0.92), `${base}-sheet-${doc.frames.length}f-${scale}x.${format}`)
+    } catch (err) {
+      toast({
+        title: 'Export failed',
+        description: err instanceof Error ? err.message : 'Something went wrong while exporting.',
+        variant: 'destructive',
+      })
+    } finally {
+      setExporting(false)
     }
-
-    toast({
-      title: 'Export complete',
-      description: scope === 'frame' ? 'Current frame exported.' : `Sprite sheet (${doc.frames.length} frames) exported.`,
-    })
   }
 
   const exportPalette = () => {
@@ -139,6 +222,16 @@ export function ExportDialog() {
   const rowsPreview = Math.ceil(frameCount / Math.max(1, colsPreview))
   const sheetW = docW * colsPreview * scale
   const sheetH = docH * rowsPreview * scale
+  const raster = scope === 'frame' || scope === 'sheet'
+  const outputLabel =
+    scope === 'sheet'
+      ? `${sheetW}×${sheetH}px`
+      : scope === 'gif'
+        ? `${docW * scale}×${docH * scale}px per frame · looping`
+        : scope === 'zip'
+          ? `${docW * scale}×${docH * scale}px per frame · ${frameCount} PNG ${frameCount === 1 ? 'file' : 'files'}`
+          : `${docW * scale}×${docH * scale}px`
+  const exportName = scope === 'gif' ? 'GIF' : scope === 'zip' ? 'ZIP' : format.toUpperCase()
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -151,20 +244,23 @@ export function ExportDialog() {
         </DialogHeader>
 
         <div className="grid gap-4 py-1">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="grid gap-1.5">
-              <Label htmlFor="pf-exp-format">Format</Label>
-              <Select value={format} onValueChange={(v) => setFormat(v as Format)}>
-                <SelectTrigger id="pf-exp-format" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="png">PNG (transparency)</SelectItem>
-                  <SelectItem value="jpeg">JPEG (flat background)</SelectItem>
-                  <SelectItem value="webp">WebP (transparency)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+          <div className={raster ? 'grid grid-cols-2 gap-3' : 'grid gap-1.5'}>
+            {raster ? (
+              <div className="grid gap-1.5">
+                <Label htmlFor="pf-exp-format">Format</Label>
+                <Select value={format} onValueChange={(v) => setFormat(v as Format)}>
+                  <SelectTrigger id="pf-exp-format" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="png">PNG (transparency)</SelectItem>
+                    <SelectItem value="jpeg">JPEG (flat background)</SelectItem>
+                    <SelectItem value="webp">WebP (transparency)</SelectItem>
+                    <SelectItem value="bmp">BMP (no compression)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
             <div className="grid gap-1.5">
               <Label htmlFor="pf-exp-scale">Scale</Label>
               <Select value={String(scale)} onValueChange={(v) => setScale(Number(v))}>
@@ -184,16 +280,29 @@ export function ExportDialog() {
 
           <div className="grid gap-1.5">
             <Label htmlFor="pf-exp-scope">Scope</Label>
-            <Select value={scope} onValueChange={(v) => setScope(v === 'sheet' ? 'sheet' : 'frame')}>
+            <Select value={scope} onValueChange={(v) => setScope(v as Scope)}>
               <SelectTrigger id="pf-exp-scope" className="w-full">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="frame">Current frame</SelectItem>
                 <SelectItem value="sheet">Sprite sheet (all frames)</SelectItem>
+                <SelectItem value="gif">Animated GIF (looping, 256-color)</SelectItem>
+                <SelectItem value="zip">Frames as ZIP (PNG)</SelectItem>
               </SelectContent>
             </Select>
           </div>
+
+          {scope === 'gif' ? (
+            <p className="text-xs text-zinc-500">
+              256 colors per frame · 1-bit transparency · loops forever. Frame delay comes from each
+              frame&apos;s duration.
+            </p>
+          ) : null}
+
+          {scope === 'zip' ? (
+            <p className="text-xs text-zinc-500">One transparent PNG per frame, zipped client-side (DEFLATE).</p>
+          ) : null}
 
           {scope === 'sheet' ? (
             <div className="grid grid-cols-2 gap-3">
@@ -220,9 +329,9 @@ export function ExportDialog() {
             </div>
           ) : null}
 
-          {format === 'jpeg' ? (
+          {raster && (format === 'jpeg' || format === 'bmp') ? (
             <div className="grid gap-1.5">
-              <Label htmlFor="pf-exp-bg">Background color (JPEG has no transparency)</Label>
+              <Label htmlFor="pf-exp-bg">Background (JPEG &amp; BMP — flat, no transparency)</Label>
               <Input
                 id="pf-exp-bg"
                 type="color"
@@ -234,8 +343,7 @@ export function ExportDialog() {
           ) : null}
 
           <p className="text-xs text-zinc-500">
-            Output: {scope === 'frame' ? `${docW * scale}×${docH * scale}px` : `${sheetW}×${sheetH}px`}{' '}
-            · <span className="text-zinc-400">imageSmoothingEnabled = false (nearest-neighbor)</span>
+            Output: {outputLabel} · <span className="text-zinc-400">imageSmoothingEnabled = false (nearest-neighbor)</span>
           </p>
         </div>
 
@@ -244,9 +352,9 @@ export function ExportDialog() {
             <FileJson className="size-4" />
             Export palette JSON
           </Button>
-          <Button onClick={runExport}>
-            <ImageDown className="size-4" />
-            Export {format.toUpperCase()}
+          <Button onClick={runExport} disabled={exporting}>
+            {exporting ? <Loader2 className="size-4 animate-spin" /> : <ImageDown className="size-4" />}
+            {exporting ? 'Exporting…' : `Export ${exportName}`}
           </Button>
         </DialogFooter>
       </DialogContent>

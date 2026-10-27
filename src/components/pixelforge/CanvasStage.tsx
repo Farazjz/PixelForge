@@ -14,11 +14,36 @@ interface SizeCache {
   h: number
 }
 
+// Image-import event contract (consumed by ImportDialog, see Task 3-a):
+// window CustomEvent 'pf:import-file' with detail { file: File }.
+const IMPORT_FILE_EVENT = 'pf:import-file'
+
+const firstImageFile = (dt: DataTransfer | null): File | null => {
+  if (!dt) return null
+  // Prefer the first dropped file entry when it is an image…
+  if (dt.files.length > 0 && dt.files[0].type.startsWith('image/')) return dt.files[0]
+  // …else scan items for anything file-typed and image-ish (e.g. dragged <img> elements).
+  for (let i = 0; i < dt.items.length; i++) {
+    const item = dt.items[i]
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const f = item.getAsFile()
+      if (f) return f
+    }
+  }
+  return null
+}
+
+const dragHasFiles = (e: DragEvent): boolean => {
+  const dt = e.dataTransfer
+  return !!dt && Array.from(dt.types).includes('Files')
+}
+
 export default function CanvasStage() {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const spaceRef = useRef(false)
   const [spaceHeld, setSpaceHeld] = useState(false)
+  const [dropActive, setDropActive] = useState(false)
   const panRef = useRef<{ sx: number; sy: number; panX: number; panY: number } | null>(null)
   const strokeRef = useRef(false)
   const rafRef = useRef<number | null>(null)
@@ -377,6 +402,91 @@ export default function CanvasStage() {
     return () => canvas?.removeEventListener('contextmenu', onCtx)
   }, [])
 
+  // ---------- image import: drag & drop ----------
+  // Attached to the stage container; never touches canvas pointer/pan/stroke logic.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    let depth = 0 // guards against dragenter/dragleave child flicker
+
+    const onDragEnter = (e: DragEvent) => {
+      e.preventDefault()
+      if (!dragHasFiles(e)) return // highlight file drags only
+      depth += 1
+      setDropActive(true)
+    }
+    const onDragOver = (e: DragEvent) => {
+      e.preventDefault() // required so 'drop' can fire
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    }
+    const onDragLeave = () => {
+      depth -= 1
+      if (depth <= 0) {
+        depth = 0
+        setDropActive(false)
+      }
+    }
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault() // never let the browser navigate, for any drop
+      depth = 0
+      setDropActive(false)
+      const file = firstImageFile(e.dataTransfer)
+      if (!file) return // non-image drops are ignored
+      window.dispatchEvent(new CustomEvent(IMPORT_FILE_EVENT, { detail: { file } }))
+    }
+
+    el.addEventListener('dragenter', onDragEnter)
+    el.addEventListener('dragover', onDragOver)
+    el.addEventListener('dragleave', onDragLeave)
+    el.addEventListener('drop', onDrop)
+    return () => {
+      el.removeEventListener('dragenter', onDragEnter)
+      el.removeEventListener('dragover', onDragOver)
+      el.removeEventListener('dragleave', onDragLeave)
+      el.removeEventListener('drop', onDrop)
+    }
+  }, [])
+
+  // ---------- image import: clipboard paste ----------
+  // Window-level 'paste' listener. Mirrors useShortcuts.ts guards: never swallows
+  // normal text paste into editable targets or inside open dialogs, and only
+  // preventDefault()s when an image File is actually present.
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false
+      return (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
+      )
+    }
+    const isDialogOpen = (): boolean =>
+      typeof document !== 'undefined' && document.querySelector('[role="dialog"]') !== null
+
+    const onPaste = (e: ClipboardEvent) => {
+      if (isEditableTarget(e.target) || isDialogOpen()) return
+      const dt = e.clipboardData
+      if (!dt) return
+      let file: File | null = null
+      for (let i = 0; i < dt.items.length; i++) {
+        const item = dt.items[i]
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          const f = item.getAsFile()
+          if (f) {
+            file = f
+            break
+          }
+        }
+      }
+      if (!file) return // plain text/HTML paste flows through untouched
+      e.preventDefault()
+      window.dispatchEvent(new CustomEvent(IMPORT_FILE_EVENT, { detail: { file } }))
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [])
+
   // space-to-pan
   useEffect(() => {
     const isTyping = (): boolean => {
@@ -426,8 +536,18 @@ export default function CanvasStage() {
         onPointerLeave={() => useHudStore.getState().setCursor(null)}
       />
       <div className="pointer-events-none absolute left-3 top-3 rounded bg-zinc-900/80 px-2 py-1 text-[11px] text-zinc-400">
-        {docW}×{docH} · Space+drag / middle mouse to pan · wheel to zoom
+        {docW}×{docH} · Space+drag / middle mouse to pan · wheel to zoom · drop or paste an image to import
       </div>
+      {dropActive && (
+        <div
+          className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center border-2 border-violet-500/70 bg-violet-600/10"
+          aria-hidden="true"
+        >
+          <span className="rounded bg-zinc-900/90 px-3 py-1.5 text-xs font-medium text-violet-300 shadow-lg">
+            Drop image to import
+          </span>
+        </div>
+      )}
     </div>
   )
 }

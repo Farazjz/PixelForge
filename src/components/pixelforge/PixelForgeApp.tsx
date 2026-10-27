@@ -18,6 +18,7 @@ import { SettingsDialog } from './dialogs/SettingsDialog'
 import { ResizeDialog } from './dialogs/ResizeDialog'
 import { AboutDialog } from './dialogs/AboutDialog'
 import { CloudSaveDialog } from './dialogs/CloudSaveDialog'
+import ImportDialog from './dialogs/ImportDialog'
 import { useEditorStore } from '@/lib/pixelforge/store'
 import { useSettingsStore } from '@/lib/pixelforge/settings-store'
 import { serializeDoc, deserializeDoc } from '@/lib/pixelforge/engine'
@@ -80,6 +81,32 @@ export default function PixelForgeApp() {
     return () => clearInterval(interval)
   }, [])
 
+  // Ctrl+S / File ▸ Save — download the native .pfa project file
+  useEffect(() => {
+    const save = () => {
+      try {
+        const st = useEditorStore.getState()
+        const json = serializeDoc(st.doc)
+        const blob = new Blob([json], { type: 'application/json' })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        const safe = st.doc.name.replace(/[^a-zA-Z0-9-_]+/g, '-').replace(/^-|-$/g, '') || 'pixelforge'
+        a.href = url
+        a.download = `${safe}.pfa`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        setTimeout(() => URL.revokeObjectURL(url), 2000)
+        st.markSaved()
+        toast({ title: 'Project saved', description: `"${st.doc.name}.pfa" downloaded to your computer.` })
+      } catch {
+        toast({ title: 'Save failed', description: 'Could not serialize the project.', variant: 'destructive' })
+      }
+    }
+    window.addEventListener('pf:menu-save', save)
+    return () => window.removeEventListener('pf:menu-save', save)
+  }, [toast])
+
   // warn on unload with unsaved changes
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent) => {
@@ -115,6 +142,7 @@ export default function PixelForgeApp() {
       <ResizeDialog />
       <AboutDialog />
       <CloudSaveDialog />
+      <ImportDialog />
     </div>
   )
 }

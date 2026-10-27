@@ -1,0 +1,699 @@
+     1→'use client'
+     2→
+     3→// PixelForge AI — Import dialog. Opens on window events:
+     4→//   'pf:menu-import'            — fired by MenuBar ▸ File ▸ Import Image…
+     5→//   'pf:import-file'            — fired by the drag & drop surface (detail: { file: File })
+     6→// Imports PNG/JPEG/WebP/BMP/GIF files as a new document, a new layer, or new
+     7→// animation frames — with sprite-sheet slicing and pixel-art conversion
+     8→// (palette limiting, background removal, dark outline). .pfa project files are
+     9→// recognized and opened directly via loadDoc.
+    10→
+    11→import { useCallback, useEffect, useRef, useState } from 'react'
+    12→import {
+    13→  AlertTriangle,
+    14→  FileImage,
+    15→  Grid3x3,
+    16→  Import as ImportIcon,
+    17→  Info,
+    18→  Loader2,
+    19→  Scaling,
+    20→  Wand2,
+    21→} from 'lucide-react'
+    22→
+    23→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    24→import { Badge } from '@/components/ui/badge'
+    25→import { Button } from '@/components/ui/button'
+    26→import {
+    27→  Dialog,
+    28→  DialogContent,
+    29→  DialogDescription,
+    30→  DialogFooter,
+    31→  DialogHeader,
+    32→  DialogTitle,
+    33→} from '@/components/ui/dialog'
+    34→import { Input } from '@/components/ui/input'
+    35→import { Label } from '@/components/ui/label'
+    36→import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+    37→import {
+    38→  Select,
+    39→  SelectContent,
+    40→  SelectItem,
+    41→  SelectTrigger,
+    42→  SelectValue,
+    43→} from '@/components/ui/select'
+    44→import { Slider } from '@/components/ui/slider'
+    45→import { Switch } from '@/components/ui/switch'
+    46→import {
+    47→  MAX_CANVAS_DIM,
+    48→  deserializeDoc,
+    49→  extractRegion,
+    50→  imageToCel,
+    51→  nearestResizeTo,
+    52→  outlineCel,
+    53→  quantize,
+    54→  removeBackground,
+    55→  type RGBA,
+    56→} from '@/lib/pixelforge/engine'
+    57→import { decodeGifFile, decodeImageFile, sliceSheet, type GifFrame } from '@/lib/pixelforge/import-utils'
+    58→import { useEditorStore } from '@/lib/pixelforge/store'
+    59→import { toast } from '@/hooks/use-toast'
+    60→import { cn } from '@/lib/utils'
+    61→
+    62→type ImportMode = 'new-doc' | 'layer' | 'frames'
+    63→type Sizing = 'original' | 'resize' | 'crop'
+    64→
+    65→interface ImportCell {
+    66→  data: Uint8ClampedArray
+    67→  w: number
+    68→  h: number
+    69→  delayMs: number | null
+    70→}
+    71→
+    72→const CHECKER_STYLE: React.CSSProperties = {
+    73→  backgroundImage: 'repeating-conic-gradient(#3f3f46 0% 25%, #27272a 0% 50%)',
+    74→}
+    75→
+    76→const OUTLINE_COLOR: RGBA = [10, 10, 10, 255]
+    77→
+    78→const ACCEPTED = 'image/png,image/jpeg,image/webp,image/bmp,image/gif,.pfa,.json'
+    79→
+    80→const yieldToUi = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+    81→
+    82→const baseName = (fileName: string): string =>
+    83→  fileName.replace(/\.[^.]+$/, '').trim().slice(0, 64) || 'Imported image'
+    84→
+    85→function formatLabel(file: File): string {
+    86→  const t = (file.type || '').toLowerCase()
+    87→  if (t === 'image/png') return 'PNG'
+    88→  if (t === 'image/jpeg') return 'JPEG'
+    89→  if (t === 'image/webp') return 'WebP'
+    90→  if (t === 'image/bmp') return 'BMP'
+    91→  if (t === 'image/gif') return 'GIF'
+    92→  const ext = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)
+    93→  return (ext?.[1] ?? 'image').toUpperCase()
+    94→}
+    95→
+    96→const clampDim = (raw: string): number => {
+    97→  const n = Math.floor(Number(raw))
+    98→  return Number.isFinite(n) ? Math.max(1, Math.min(64, n)) : 1
+    99→}
+   100→
+   101→const clampDuration = (ms: number): number => Math.max(10, Math.min(10000, Math.round(ms)))
+   102→
+   103→/** Merge extracted palette colors ahead of the document palette (dedupe, cap 256 in the store). */
+   104→function mergeExtractedPalette(extracted: string[]): void {
+   105→  if (extracted.length === 0) return
+   106→  const st = useEditorStore.getState()
+   107→  const seen = new Set<string>()
+   108→  const merged: string[] = []
+   109→  for (const c of [...extracted, ...st.doc.palette]) {
+   110→    const key = c.toUpperCase()
+   111→    if (!seen.has(key)) {
+   112→      seen.add(key)
+   113→      merged.push(key)
+   114→    }
+   115→  }
+   116→  st.setDocPalette(merged)
+   117→}
+   118→
+   119→export default function ImportDialog() {
+   120→  const [open, setOpen] = useState(false)
+   121→  const [busy, setBusy] = useState(false)
+   122→  const [importing, setImporting] = useState(false)
+   123→  const [error, setError] = useState<string | null>(null)
+   124→
+   125→  const [file, setFile] = useState<File | null>(null)
+   126→  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+   127→  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
+   128→  const [format, setFormat] = useState('—')
+   129→  const [gifFrames, setGifFrames] = useState<GifFrame[] | null>(null)
+   130→  const imgRef = useRef<HTMLImageElement | null>(null)
+   131→
+   132→  const [mode, setMode] = useState<ImportMode>('new-doc')
+   133→  const [sizing, setSizing] = useState<Sizing>('original')
+   134→  const [sliceOn, setSliceOn] = useState(false)
+   135→  const [cols, setCols] = useState('1')
+   136→  const [rows, setRows] = useState('1')
+   137→  const [limitPalette, setLimitPalette] = useState(false)
+   138→  const [paletteN, setPaletteN] = useState(16)
+   139→  const [removeBg, setRemoveBg] = useState(false)
+   140→  const [tolerance, setTolerance] = useState(32)
+   141→  const [outline, setOutline] = useState(false)
+   142→
+   143→  // Narrow subscriptions — only what the target-dims hints need
+   144→  const docW = useEditorStore((s) => s.doc.width)
+   145→  const docH = useEditorStore((s) => s.doc.height)
+   146→
+   147→  // ---- derived availability ----
+   148→  const isMultiGif = (gifFrames?.length ?? 0) > 1 && gifFrames !== null
+   149→  const slicingActive = sliceOn && !isMultiGif
+   150→  const cellCount = isMultiGif && gifFrames ? gifFrames.length : slicingActive ? clampDim(cols) * clampDim(rows) : 1
+   151→  const colsNum = clampDim(cols)
+   152→  const rowsNum = clampDim(rows)
+   153→  const cellW = dims ? Math.max(1, Math.floor(dims.w / colsNum)) : 0
+   154→  const cellH = dims ? Math.max(1, Math.floor(dims.h / rowsNum)) : 0
+   155→
+   156→  // Modes only make sense for the current cell count; auto-correct instead of failing.
+   157→  useEffect(() => {
+   158→    if (cellCount > 1 && mode === 'layer') setMode('frames')
+   159→    else if (cellCount <= 1 && mode === 'frames') setMode('layer')
+   160→  }, [cellCount, mode])
+   161→
+   162→  // Revoke the previous object URL whenever it changes / on unmount
+   163→  useEffect(() => {
+   164→    return () => {
+   165→      if (previewUrl) URL.revokeObjectURL(previewUrl)
+   166→    }
+   167→  }, [previewUrl])
+   168→
+   169→  const resetForNewSelection = useCallback(() => {
+   170→    setError(null)
+   171→    setFile(null)
+   172→    setPreviewUrl(null)
+   173→    setDims(null)
+   174→    setFormat('—')
+   175→    setGifFrames(null)
+   176→    imgRef.current = null
+   177→    setMode('new-doc')
+   178→    setSizing('original')
+   179→    setSliceOn(false)
+   180→    setCols('1')
+   181→    setRows('1')
+   182→    setImporting(false)
+   183→  }, [])
+   184→
+   185→  // ---- file selection (shared by picker, drop and 'pf:import-file') ----
+   186→  const selectFile = useCallback(async (f: File) => {
+   187→    setBusy(true)
+   188→    setError(null)
+   189→    try {
+   190→      const lower = f.name.toLowerCase()
+   191→      // Native project files load directly, no import options needed.
+   192→      if (lower.endsWith('.pfa') || lower.endsWith('.json')) {
+   193→        const text = await f.text()
+   194→        const doc = deserializeDoc(text)
+   195→        useEditorStore.getState().loadDoc(doc)
+   196→        toast({ title: 'Project opened', description: `${doc.name} — ${doc.width}×${doc.height}px` })
+   197→        setOpen(false)
+   198→        return
+   199→      }
+   200→
+   201→      if (f.type === 'image/gif' || lower.endsWith('.gif')) {
+   202→        await yieldToUi() // let the spinner paint before the synchronous decode
+   203→        const frames = await decodeGifFile(f)
+   204→        imgRef.current = null
+   205→        setGifFrames(frames)
+   206→        setDims({ w: frames[0].w, h: frames[0].h })
+   207→        setFormat('GIF')
+   208→        setPreviewUrl(URL.createObjectURL(f))
+   209→      } else {
+   210→        const decoded = await decodeImageFile(f)
+   211→        imgRef.current = decoded.img
+   212→        setGifFrames(null)
+   213→        setDims({ w: decoded.w, h: decoded.h })
+   214→        setFormat(formatLabel(f))
+   215→        setPreviewUrl(URL.createObjectURL(f))
+   216→      }
+   217→      setFile(f)
+   218→      setMode('new-doc')
+   219→      setSizing('original')
+   220→    } catch (e) {
+   221→      setError(e instanceof Error ? e.message : 'Could not read that file.')
+   222→    } finally {
+   223→      setBusy(false)
+   224→    }
+   225→  }, [])
+   226→
+   227→  // ---- window event contract ----
+   228→  useEffect(() => {
+   229→    const onMenuImport = () => {
+   230→      resetForNewSelection()
+   231→      setOpen(true)
+   232→    }
+   233→    const onImportFile = (ev: Event) => {
+   234→      const detail: unknown = ev instanceof CustomEvent ? ev.detail : null
+   235→      const maybeFile =
+   236→        detail && typeof detail === 'object' && 'file' in detail
+   237→          ? (detail as { file: unknown }).file
+   238→          : null
+   239→      resetForNewSelection()
+   240→      setOpen(true)
+   241→      if (maybeFile instanceof File) void selectFile(maybeFile)
+   242→    }
+   243→    window.addEventListener('pf:menu-import', onMenuImport)
+   244→    window.addEventListener('pf:import-file', onImportFile)
+   245→    return () => {
+   246→      window.removeEventListener('pf:menu-import', onMenuImport)
+   247→      window.removeEventListener('pf:import-file', onImportFile)
+   248→    }
+   249→  }, [resetForNewSelection, selectFile])
+   250→
+   251→  // ---- import pipeline ----
+   252→  const buildSourceCells = useCallback((): ImportCell[] | null => {
+   253→    if (gifFrames && gifFrames.length > 0) {
+   254→      if (gifFrames.length > 1) {
+   255→        return gifFrames.map((f) => ({ data: f.data, w: f.w, h: f.h, delayMs: f.delayMs }))
+   256→      }
+   257→      const f0 = gifFrames[0]
+   258→      const src: ImportCell = { data: f0.data, w: f0.w, h: f0.h, delayMs: null }
+   259→      if (!slicingActive) return [src]
+   260→      return sliceSheet(f0.data, f0.w, f0.h, colsNum, rowsNum).map((c) => ({
+   261→        data: c.data,
+   262→        w: c.w,
+   263→        h: c.h,
+   264→        delayMs: null,
+   265→      }))
+   266→    }
+   267→    const img = imgRef.current
+   268→    if (!img || !dims) return null
+   269→    const base = imageToCel(img, dims.w, dims.h)
+   270→    if (!slicingActive) return [{ data: base, w: dims.w, h: dims.h, delayMs: null }]
+   271→    return sliceSheet(base, dims.w, dims.h, colsNum, rowsNum).map((c) => ({
+   272→      data: c.data,
+   273→      w: c.w,
+   274→      h: c.h,
+   275→      delayMs: null,
+   276→    }))
+   277→  }, [gifFrames, slicingActive, colsNum, rowsNum, dims])
+   278→
+   279→  const doImport = useCallback(async () => {
+   280→    if (!file || !dims || busy || importing) return
+   281→    setImporting(true)
+   282→    setError(null)
+   283→    try {
+   284→      await yieldToUi()
+   285→      // Honest guard: replace-layer imports are silently dropped by the store on locked layers.
+   286→      if (mode !== 'new-doc') {
+   287→        const stNow = useEditorStore.getState()
+   288→        const activeLayer = stNow.doc.layers.find((l) => l.id === stNow.activeLayerId)
+   289→        if (activeLayer?.locked) {
+   290→          throw new Error('The active layer is locked — unlock it (Layers panel) before importing into this document.')
+   291→        }
+   292→      }
+   293→
+   294→      let cells = buildSourceCells()
+   295→      if (!cells || cells.length === 0) {
+   296→        throw new Error('Nothing to import — choose an image first.')
+   297→      }
+   298→
+   299→      // Sizing only matters when placing into an existing document.
+   300→      if (mode !== 'new-doc') {
+   301→        const { width: dw, height: dh } = useEditorStore.getState().doc
+   302→        cells = cells.map((cell) => {
+   303→          if (sizing === 'resize') {
+   304→            const r = nearestResizeTo(cell.data, cell.w, cell.h, dw, dh)
+   305→            return { ...cell, data: r.data, w: r.w, h: r.h }
+   306→          }
+   307→          if (sizing === 'crop') {
+   308→            const cw = Math.min(cell.w, dw)
+   309→            const ch = Math.min(cell.h, dh)
+   310→            const rect = {
+   311→              x: Math.floor((cell.w - cw) / 2),
+   312→              y: Math.floor((cell.h - ch) / 2),
+   313→              w: cw,
+   314→              h: ch,
+   315→            }
+   316→            return { ...cell, data: extractRegion(cell.data, cell.w, cell.h, rect), w: cw, h: ch }
+   317→          }
+   318→          return cell
+   319→        })
+   320→      }
+   321→
+   322→      // Pixel-art conversion per cell (remove bg → quantize → outline).
+   323→      const extracted: string[] = []
+   324→      cells = cells.map((cell) => {
+   325→        let data: Uint8ClampedArray = new Uint8ClampedArray(cell.data)
+   326→        if (removeBg) removeBackground(data, cell.w, cell.h, tolerance)
+   327→        if (limitPalette) {
+   328→          const q = quantize(data, paletteN)
+   329→          data = q.data
+   330→          extracted.push(...q.palette)
+   331→        }
+   332→        if (outline) outlineCel(data, cell.w, cell.h, OUTLINE_COLOR)
+   333→        return { ...cell, data }
+   334→      })
+   335→
+   336→      if (mode === 'new-doc') {
+   337→        const first = cells[0]
+   338→        const w = Math.min(MAX_CANVAS_DIM, Math.max(1, first.w))
+   339→        const h = Math.min(MAX_CANVAS_DIM, Math.max(1, first.h))
+   340→        useEditorStore.getState().newDoc(w, h, baseName(file.name))
+   341→        useEditorStore.getState().importImageIntoDoc(first.data, first.w, first.h, 'replace-layer')
+   342→        for (let i = 1; i < cells.length; i++) {
+   343→          const cell = cells[i]
+   344→          const st = useEditorStore.getState()
+   345→          st.addFrame(false) // inserts after the active frame and activates it
+   346→          const st2 = useEditorStore.getState()
+   347→          if (cell.delayMs !== null) st2.updateFrame(st2.activeFrameId, { durationMs: clampDuration(cell.delayMs) })
+   348→          st2.importImageIntoDoc(cell.data, cell.w, cell.h, 'replace-layer')
+   349→        }
+   350→        mergeExtractedPalette(extracted)
+   351→        toast({
+   352→          title: 'New document created',
+   353→          description:
+   354→            cells.length > 1
+   355→              ? `Imported ${cells.length} frames (${w}×${h}).`
+   356→              : `${w}×${h}px from “${file.name}”.`,
+   357→        })
+   358→      } else if (mode === 'layer') {
+   359→        const cell = cells[0]
+   360→        useEditorStore.getState().importImageIntoDoc(cell.data, cell.w, cell.h, 'new-layer')
+   361→        mergeExtractedPalette(extracted)
+   362→        toast({
+   363→          title: 'Imported as new layer',
+   364→          description: `${cell.w}×${cell.h}px added to the current document.`,
+   365→        })
+   366→      } else {
+   367→        for (const cell of cells) {
+   368→          const st = useEditorStore.getState()
+   369→          st.addFrame(false)
+   370→          const st2 = useEditorStore.getState()
+   371→          if (cell.delayMs !== null) st2.updateFrame(st2.activeFrameId, { durationMs: clampDuration(cell.delayMs) })
+   372→          st2.importImageIntoDoc(cell.data, cell.w, cell.h, 'replace-layer')
+   373→        }
+   374→        mergeExtractedPalette(extracted)
+   375→        toast({
+   376→          title: 'Frames imported',
+   377→          description: `Imported ${cells.length} frames (${cells[0].w}×${cells[0].h}).`,
+   378→        })
+   379→      }
+   380→      setOpen(false)
+   381→    } catch (e) {
+   382→      setError(e instanceof Error ? e.message : 'Import failed.')
+   383→    } finally {
+   384→      setImporting(false)
+   385→    }
+   386→  }, [file, dims, busy, importing, buildSourceCells, mode, sizing, removeBg, tolerance, limitPalette, paletteN, outline])
+   387→
+   388→  const clampNote =
+   389→    mode === 'new-doc' && dims !== null && (dims.w > MAX_CANVAS_DIM || dims.h > MAX_CANVAS_DIM)
+   390→      ? `The image is larger than the ${MAX_CANVAS_DIM}px canvas limit — the new document will be clamped to ${Math.min(MAX_CANVAS_DIM, dims.w)}×${Math.min(MAX_CANVAS_DIM, dims.h)} and overflowing pixels are cropped.`
+   391→      : null
+   392→
+   393→  const sizingHint =
+   394→    sizing === 'original'
+   395→      ? mode === 'layer'
+   396→        ? 'Placed centered at its original size; oversized images are scaled down to fit the canvas.'
+   397→        : 'Frames keep their pixel size; anything past the canvas edge is clipped.'
+   398→      : sizing === 'resize'
+   399→        ? `Nearest-neighbor resize to the canvas size (${docW}×${docH}).`
+   400→        : `Center-crop to the canvas size (${docW}×${docH}) before placing.`
+   401→
+   402→  return (
+   403→    <Dialog open={open} onOpenChange={setOpen}>
+   404→      <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+   405→        <DialogHeader>
+   406→          <DialogTitle>Import Image</DialogTitle>
+   407→          <DialogDescription>
+   408→            Bring PNG, JPEG, WebP, BMP or GIF files in as documents, layers or animation frames.
+   409→          </DialogDescription>
+   410→        </DialogHeader>
+   411→
+   412→        {/* ---------- Source ---------- */}
+   413→        <section aria-label="Choose source" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+   414→          <div className="flex items-center gap-2">
+   415→            <FileImage className="size-4 text-violet-400" />
+   416→            <h3 className="text-sm font-semibold text-zinc-100">Source</h3>
+   417→          </div>
+   418→
+   419→          <label
+   420→            className={cn(
+   421→              'flex min-h-28 w-full cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed px-4 py-5 text-center transition-colors',
+   422→              busy
+   423→                ? 'border-violet-500/60 bg-violet-500/5'
+   424→                : 'border-zinc-700 bg-zinc-900/60 hover:border-violet-500/60 hover:bg-violet-500/5',
+   425→            )}
+   426→            onDragOver={(e) => e.preventDefault()}
+   427→            onDrop={(e) => {
+   428→              e.preventDefault()
+   429→              const f = e.dataTransfer.files?.[0]
+   430→              if (f) void selectFile(f)
+   431→            }}
+   432→          >
+   433→            <input
+   434→              type="file"
+   435→              accept={ACCEPTED}
+   436→              className="hidden"
+   437→              onChange={(e) => {
+   438→                const f = e.target.files?.[0]
+   439→                if (f) void selectFile(f)
+   440→                e.target.value = ''
+   441→              }}
+   442→            />
+   443→            {busy ? (
+   444→              <Loader2 className="size-6 animate-spin text-violet-400" />
+   445→            ) : (
+   446→              <FileImage className="size-6 text-zinc-500" />
+   447→            )}
+   448→            <span className="text-sm font-medium text-zinc-200">
+   449→              {busy ? 'Decoding…' : 'Click to choose or drop an image'}
+   450→            </span>
+   451→            <span className="text-xs text-zinc-500">PNG, JPEG, WebP, BMP, GIF — or a .pfa project file</span>
+   452→          </label>
+   453→
+   454→          {file && dims ? (
+   455→            <div className="grid gap-2">
+   456→              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+   457→                <span className="min-w-0 flex-1 truncate text-sm text-zinc-200" title={file.name}>
+   458→                  {file.name}
+   459→                </span>
+   460→                <Badge variant="secondary" className="shrink-0 font-mono text-[10px]">
+   461→                  {dims.w}×{dims.h}
+   462→                </Badge>
+   463→                <Badge variant="outline" className="shrink-0 text-[10px]">
+   464→                  {format}
+   465→                </Badge>
+   466→                {isMultiGif && gifFrames ? (
+   467→                  <Badge variant="outline" className="shrink-0 text-[10px]">
+   468→                    {gifFrames.length} frames
+   469→                  </Badge>
+   470→                ) : null}
+   471→              </div>
+   472→              <img
+   473→                src={previewUrl ?? undefined}
+   474→                alt={`Preview of ${file.name}`}
+   475→                className="mx-auto max-h-40 w-auto max-w-full rounded border border-zinc-800 object-contain"
+   476→                style={{ ...CHECKER_STYLE, imageRendering: 'pixelated' }}
+   477→              />
+   478→            </div>
+   479→          ) : null}
+   480→        </section>
+   481→
+   482→        {/* ---------- Import mode ---------- */}
+   483→        <section aria-label="Import mode" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+   484→          <div className="flex items-center gap-2">
+   485→            <ImportIcon className="size-4 text-violet-400" />
+   486→            <h3 className="text-sm font-semibold text-zinc-100">Import mode</h3>
+   487→          </div>
+   488→          <RadioGroup value={mode} onValueChange={(v) => setMode(v as ImportMode)} className="gap-3">
+   489→            <div className="flex items-start gap-2.5">
+   490→              <RadioGroupItem value="new-doc" id="pf-im-new-doc" className="mt-0.5" />
+   491→              <Label htmlFor="pf-im-new-doc" className="flex cursor-pointer flex-col gap-0.5 font-normal">
+   492→                <span className="text-sm text-zinc-100">New document</span>
+   493→                <span className="text-xs text-zinc-500">Creates a canvas matching the image (or each sliced cell).</span>
+   494→              </Label>
+   495→            </div>
+   496→            <div className="flex items-start gap-2.5">
+   497→              <RadioGroupItem value="layer" id="pf-im-layer" disabled={cellCount > 1} className="mt-0.5" />
+   498→              <Label htmlFor="pf-im-layer" className="flex cursor-pointer flex-col gap-0.5 font-normal">
+   499→                <span className="text-sm text-zinc-100">As layer in current document</span>
+   500→                <span className="text-xs text-zinc-500">
+   501→                  {cellCount > 1 ? 'Multiple cells import as frames instead.' : `Adds a new layer to the ${docW}×${docH} document.`}
+   502→                </span>
+   503→              </Label>
+   504→            </div>
+   505→            <div className="flex items-start gap-2.5">
+   506→              <RadioGroupItem value="frames" id="pf-im-frames" disabled={cellCount <= 1} className="mt-0.5" />
+   507→              <Label htmlFor="pf-im-frames" className="flex cursor-pointer flex-col gap-0.5 font-normal">
+   508→                <span className="text-sm text-zinc-100">As new frames (animation)</span>
+   509→                <span className="text-xs text-zinc-500">
+   510→                  {cellCount <= 1
+   511→                    ? 'Enable sprite-sheet slicing or choose a multi-frame GIF to unlock.'
+   512→                    : `Appends ${cellCount} frame${cellCount === 1 ? '' : 's'} after the current ones.`}
+   513→                </span>
+   514→              </Label>
+   515→            </div>
+   516→          </RadioGroup>
+   517→        </section>
+   518→
+   519→        {/* ---------- Sizing (irrelevant for new documents) ---------- */}
+   520→        {mode !== 'new-doc' ? (
+   521→          <section aria-label="Sizing" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+   522→            <div className="flex items-center gap-2">
+   523→              <Scaling className="size-4 text-violet-400" />
+   524→              <h3 className="text-sm font-semibold text-zinc-100">Sizing</h3>
+   525→              <span className="text-xs text-zinc-500">— target canvas {docW}×{docH}</span>
+   526→            </div>
+   527→            <div className="grid gap-1.5">
+   528→              <Label htmlFor="pf-im-sizing">How the image fits the canvas</Label>
+   529→              <Select value={sizing} onValueChange={(v) => setSizing(v as Sizing)}>
+   530→                <SelectTrigger id="pf-im-sizing" className="w-full">
+   531→                  <SelectValue />
+   532→                </SelectTrigger>
+   533→                <SelectContent>
+   534→                  <SelectItem value="original">Original size</SelectItem>
+   535→                  <SelectItem value="resize">Resize to canvas</SelectItem>
+   536→                  <SelectItem value="crop">Crop to canvas</SelectItem>
+   537→                </SelectContent>
+   538→              </Select>
+   539→              <p className="text-xs text-zinc-500">{sizingHint}</p>
+   540→            </div>
+   541→          </section>
+   542→        ) : null}
+   543→
+   544→        {/* ---------- Sprite sheet slicing ---------- */}
+   545→        {!isMultiGif && dims ? (
+   546→          <section aria-label="Sprite sheet slicing" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+   547→            <div className="flex items-center justify-between gap-2">
+   548→              <div className="flex items-center gap-2">
+   549→                <Grid3x3 className="size-4 text-violet-400" />
+   550→                <h3 className="text-sm font-semibold text-zinc-100">Sprite sheet slicing</h3>
+   551→              </div>
+   552→              <div className="flex items-center gap-2">
+   553→                <Label htmlFor="pf-im-slice" className="text-xs text-zinc-400">
+   554→                  Slice into frames
+   555→                </Label>
+   556→                <Switch id="pf-im-slice" checked={sliceOn} onCheckedChange={setSliceOn} />
+   557→              </div>
+   558→            </div>
+   559→            {sliceOn ? (
+   560→              <div className="grid gap-2">
+   561→                <div className="flex items-end gap-3">
+   562→                  <div className="grid gap-1">
+   563→                    <Label htmlFor="pf-im-cols" className="text-xs text-zinc-400">
+   564→                      Columns (1–64)
+   565→                    </Label>
+   566→                    <Input
+   567→                      id="pf-im-cols"
+   568→                      type="number"
+   569→                      inputMode="numeric"
+   570→                      min={1}
+   571→                      max={64}
+   572→                      className="h-8 w-24"
+   573→                      value={cols}
+   574→                      onChange={(e) => setCols(e.target.value)}
+   575→                    />
+   576→                  </div>
+   577→                  <div className="grid gap-1">
+   578→                    <Label htmlFor="pf-im-rows" className="text-xs text-zinc-400">
+   579→                      Rows (1–64)
+   580→                    </Label>
+   581→                    <Input
+   582→                      id="pf-im-rows"
+   583→                      type="number"
+   584→                      inputMode="numeric"
+   585→                      min={1}
+   586→                      max={64}
+   587→                      className="h-8 w-24"
+   588→                      value={rows}
+   589→                      onChange={(e) => setRows(e.target.value)}
+   590→                    />
+   591→                  </div>
+   592→                </div>
+   593→                <p className="text-xs text-zinc-500">
+   594→                  {cellCount > 1
+   595→                    ? `→ ${cellW}×${cellH}px cells — ${cellCount} frames${cellCount > 256 ? ' (large count: import may take a moment)' : ''}`
+   596→                    : '→ 1 cell — increase columns or rows to actually slice.'}
+   597→                </p>
+   598→              </div>
+   599→            ) : null}
+   600→          </section>
+   601→        ) : null}
+   602→
+   603→        {/* ---------- Pixel-art conversion ---------- */}
+   604→        <section aria-label="Pixel-art conversion" className="grid gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+   605→          <div className="flex items-center gap-2">
+   606→            <Wand2 className="size-4 text-violet-400" />
+   607→            <h3 className="text-sm font-semibold text-zinc-100">Pixel-art conversion</h3>
+   608→            <span className="text-xs text-zinc-500">— applied to every imported frame</span>
+   609→          </div>
+   610→
+   611→          <div className="grid gap-2.5">
+   612→            <div className="flex items-center justify-between gap-3">
+   613→              <Label htmlFor="pf-im-palette" className="text-sm text-zinc-200">
+   614→                Limit palette
+   615→              </Label>
+   616→              <Switch id="pf-im-palette" checked={limitPalette} onCheckedChange={setLimitPalette} />
+   617→            </div>
+   618→            {limitPalette ? (
+   619→              <div className="flex items-center gap-3">
+   620→                <Slider
+   621→                  value={[paletteN]}
+   622→                  min={2}
+   623→                  max={64}
+   624→                  step={1}
+   625→                  aria-label="Palette size"
+   626→                  onValueChange={(v) => setPaletteN(v[0] ?? paletteN)}
+   627→                  className="flex-1"
+   628→                />
+   629→                <span className="w-16 text-right font-mono text-xs tabular-nums text-zinc-300">{paletteN} colors</span>
+   630→              </div>
+   631→            ) : null}
+   632→
+   633→            <div className="flex items-center justify-between gap-3">
+   634→              <Label htmlFor="pf-im-removebg" className="text-sm text-zinc-200">
+   635→                Remove background
+   636→              </Label>
+   637→              <Switch id="pf-im-removebg" checked={removeBg} onCheckedChange={setRemoveBg} />
+   638→            </div>
+   639→            {removeBg ? (
+   640→              <div className="flex items-center gap-3">
+   641→                <Slider
+   642→                  value={[tolerance]}
+   643→                  min={8}
+   644→                  max={128}
+   645→                  step={1}
+   646→                  aria-label="Background tolerance"
+   647→                  onValueChange={(v) => setTolerance(v[0] ?? tolerance)}
+   648→                  className="flex-1"
+   649→                />
+   650→                <span className="w-16 text-right font-mono text-xs tabular-nums text-zinc-300">tol {tolerance}</span>
+   651→              </div>
+   652→            ) : null}
+   653→
+   654→            <div className="flex items-center justify-between gap-3">
+   655→              <div className="grid gap-0.5">
+   656→                <Label htmlFor="pf-im-outline" className="text-sm text-zinc-200">
+   657→                  Dark outline
+   658→                </Label>
+   659→                <span className="text-xs text-zinc-500">Adds a 1px #0A0A0A outline around opaque pixels.</span>
+   660→              </div>
+   661→              <Switch id="pf-im-outline" checked={outline} onCheckedChange={setOutline} />
+   662→            </div>
+   663→          </div>
+   664→        </section>
+   665→
+   666→        {/* ---------- Honest status messages ---------- */}
+   667→        {error ? (
+   668→          <Alert variant="destructive">
+   669→            <AlertTriangle />
+   670→            <AlertTitle>Import problem</AlertTitle>
+   671→            <AlertDescription>{error}</AlertDescription>
+   672→          </Alert>
+   673→        ) : null}
+   674→        {!error && clampNote ? (
+   675→          <Alert>
+   676→            <Info />
+   677→            <AlertTitle>Canvas limit</AlertTitle>
+   678→            <AlertDescription>{clampNote}</AlertDescription>
+   679→          </Alert>
+   680→        ) : null}
+   681→
+   682→        <DialogFooter className="sm:justify-end">
+   683→          <Button variant="outline" onClick={() => setOpen(false)} disabled={importing}>
+   684→            Cancel
+   685→          </Button>
+   686→          <Button
+   687→            onClick={() => void doImport()}
+   688→            disabled={!file || busy || importing}
+   689→            className="bg-violet-600 text-white hover:bg-violet-700"
+   690→          >
+   691→            {importing ? <Loader2 className="size-4 animate-spin" /> : <ImportIcon className="size-4" />}
+   692→            {importing ? 'Importing…' : 'Import'}
+   693→          </Button>
+   694→        </DialogFooter>
+   695→      </DialogContent>
+   696→    </Dialog>
+   697→  )
+   698→}
+   699→
