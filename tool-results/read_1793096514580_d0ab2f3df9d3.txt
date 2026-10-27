@@ -1,0 +1,702 @@
+    50→    50→    50→    ...doc,
+    51→    51→    51→    frames: doc.frames.map((f) => ({ ...f })),
+    52→    52→    52→    layers: doc.layers.map((l) => ({
+    53→    53→    53→      ...l,
+    54→    54→    54→      cels: Object.fromEntries(Object.entries(l.cels).map(([k, v]) => [k, v ? cloneCel(v) : null])),
+    55→    55→    55→    })),
+    56→    56→    56→    palette: [...doc.palette],
+    57→    57→    57→    metadata: { ...doc.metadata },
+    58→    58→    58→  }
+    59→    59→    59→}
+    60→    60→    60→
+    61→    61→    61→const HISTORY_MAX_BYTES = 96 * 1024 * 1024
+    62→    62→    62→const HISTORY_MAX_ENTRIES = 48
+    63→    63→    63→
+    64→    64→    64→export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
+    65→    65→    65→  pattern: 'solid',
+    66→    66→    66→  shapeFilled: false,
+    67→    67→    67→  tolerance: 0,
+    68→    68→    68→  text: 'PIXEL',
+    69→    69→    69→  textSize: 8,
+    70→    70→    70→  textFont: 'monospace',
+    71→    71→    71→  symmetryH: false,
+    72→    72→    72→  symmetryV: false,
+    73→    73→    73→}
+    74→    74→    74→
+    75→    75→    75→export interface EditorState {
+    76→    76→    76→  doc: PFDocument
+    77→    77→    77→  activeFrameId: string
+    78→    78→    78→  activeLayerId: string
+    79→    79→    79→  tool: ToolId
+    80→    80→    80→  toolOptions: ToolOptions
+    81→    81→    81→  primary: string
+    82→    82→    82→  secondary: string
+    83→    83→    83→  recentColors: string[]
+    84→    84→    84→  selection: Rect | null
+    85→    85→    85→  floating: FloatingSelection | null
+    86→    86→    86→  clipboard: ClipboardData | null
+    87→    87→    87→  view: View
+    88→    88→    88→  viewport: { w: number; h: number }
+    89→    89→    89→  gridVisible: boolean
+    90→    90→    90→  onionSkin: boolean
+    91→    91→    91→  playing: boolean
+    92→    92→    92→  pixelVersion: number
+    93→    93→    93→  structureVersion: number
+    94→    94→    94→  dirty: boolean
+    95→    95→    95→  projectId: string | null
+    96→    96→    96→  // stroke internals
+    97→    97→    97→  strokeActive: boolean
+    98→    98→    98→  strokeButton: number
+    99→    99→    99→  strokeAnchor: { x: number; y: number } | null
+   100→   100→   100→  strokeBefore: Uint8ClampedArray | null
+   101→   101→   101→  strokeLabel: string
+   102→   102→   102→  lastPoint: { x: number; y: number } | null
+   103→   103→   103→  previewCel: Uint8ClampedArray | null
+   104→   104→   104→  undoStack: HistoryEntry[]
+   105→   105→   105→  redoStack: HistoryEntry[]
+   106→   106→   106→  historyBytes: number
+   107→   107→   107→
+   108→   108→   108→  // ---------- document ----------
+   109→   109→   109→  newDoc: (w: number, h: number, name?: string) => void
+   110→   110→   110→  loadDoc: (doc: PFDocument, projectId?: string | null) => void
+   111→   111→   111→  setDocName: (name: string) => void
+   112→   112→   112→  markSaved: (projectId?: string | null) => void
+   113→   113→   113→  resizeCanvas: (w: number, h: number, anchor?: string) => void
+   114→   114→   114→  scaleArtwork: (factor: number) => void
+   115→   115→   115→  cropToContent: () => void
+   116→   116→   116→  cropToSelection: () => void
+   117→   117→   117→  setBackground: (bg: PFDocument['background']) => void
+   118→   118→   118→
+   119→   119→   119→  // ---------- view ----------
+   120→   120→   120→  setZoom: (zoom: number, focus?: { x: number; y: number }) => void
+   121→   121→   121→  zoomBy: (factor: number, focus?: { x: number; y: number }) => void
+   122→   122→   122→  panBy: (dx: number, dy: number) => void
+   123→   123→   123→  setPan: (x: number, y: number) => void
+   124→   124→   124→  setViewport: (w: number, h: number) => void
+   125→   125→   125→  fitToViewport: () => void
+   126→   126→   126→  actualSize: () => void
+   127→   127→   127→  centerCanvas: () => void
+   128→   128→   128→  setGridVisible: (v: boolean) => void
+   129→   129→   129→  setOnionSkin: (v: boolean) => void
+   130→   130→   130→  setPlaying: (v: boolean) => void
+   131→   131→   131→
+   132→   132→   132→  // ---------- tools ----------
+   133→   133→   133→  setTool: (t: ToolId) => void
+   134→   134→   134→  setToolOptions: (o: Partial<ToolOptions>) => void
+   135→   135→   135→  setPrimary: (hex: string, pushRecent?: boolean) => void
+   136→   136→   136→  setSecondary: (hex: string) => void
+   137→   137→   137→  swapColors: () => void
+   138→   138→   138→  resetColors: () => void
+   139→   139→   139→
+   140→   140→   140→  // ---------- strokes ----------
+   141→   141→   141→  canPaint: () => boolean
+   142→   142→   142→  strokeBegin: (x: number, y: number, button: number, shift: boolean) => boolean
+   143→   143→   143→  strokeMove: (x: number, y: number, shift: boolean) => void
+   144→   144→   144→  strokeEnd: (shift: boolean) => void
+   145→   145→   145→  cancelStroke: () => void
+   146→   146→   146→
+   147→   147→   147→  // ---------- selection / floating ----------
+   148→   148→   148→  setSelection: (r: Rect | null) => void
+   149→   149→   149→  selectAll: () => void
+   150→   150→   150→  deselect: () => void
+   151→   151→   151→  moveFloating: (dx: number, dy: number) => void
+   152→   152→   152→  commitFloating: () => void
+   153→   153→   153→  cutSelection: () => void
+   154→   154→   154→  copySelection: () => void
+   155→   155→   155→  pasteClipboard: () => void
+   156→   156→   156→  deleteSelection: () => void
+   157→   157→   157→
+   158→   158→   158→  // ---------- layers ----------
+   159→   159→   159→  setActiveLayer: (id: string) => void
+   160→   160→   160→  addLayer: () => void
+   161→   161→   161→  deleteLayer: (id: string) => void
+   162→   162→   162→  duplicateLayer: (id: string) => void
+   163→   163→   163→  mergeDown: (id: string) => void
+   164→   164→   164→  moveLayer: (id: string, dir: -1 | 1) => void
+   165→   165→   165→  updateLayer: (id: string, patch: Partial<Pick<Layer, 'name' | 'visible' | 'locked' | 'opacity'>>) => void
+   166→   166→   166→  clearLayer: () => void
+   167→   167→   167→
+   168→   168→   168→  // ---------- frames ----------
+   169→   169→   169→  setActiveFrame: (id: string) => void
+   170→   170→   170→  addFrame: (copyContent: boolean) => void
+   171→   171→   171→  deleteFrame: (id: string) => void
+   172→   172→   172→  moveFrame: (id: string, dir: -1 | 1) => void
+   173→   173→   173→  updateFrame: (id: string, patch: Partial<Pick<Frame, 'durationMs'>>) => void
+   174→   174→   174→
+   175→   175→   175→  // ---------- transforms & ops ----------
+   176→   176→   176→  flip: (horizontal: boolean) => void
+   177→   177→   177→  rotate: () => void
+   178→   178→   178→  addOutline: () => void
+   179→   179→   179→  quantizeActiveLayer: (n: number) => void
+   180→   180→   180→  importImageIntoDoc: (data: Uint8ClampedArray, w: number, h: number, mode: 'new-layer' | 'replace-layer') => void
+   181→   181→   181→
+   182→   182→   182→  // ---------- palette ----------
+   183→   183→   183→  setDocPalette: (colors: string[]) => void
+   184→   184→   184→  addPaletteColor: (hex: string) => void
+   185→   185→   185→  removePaletteColor: (hex: string) => void
+   186→   186→   186→
+   187→   187→   187→  // ---------- history ----------
+   188→   188→   188→  undo: () => void
+   189→   189→   189→  redo: () => void
+   190→   190→   190→  pushHistory: (entry: HistoryEntry) => void
+   191→   191→   191→}
+   192→   192→   192→
+   193→   193→   193→function snapDoc(label: string, mutate: (d: PFDocument) => void) {
+   194→   194→   194→  const get = () => useEditorStore.getState()
+   195→   195→   195→  const set = useEditorStore.setState
+   196→   196→   196→  const { doc } = get()
+   197→   197→   197→  const before = cloneDoc(doc)
+   198→   198→   198→  const after = cloneDoc(doc)
+   199→   199→   199→  mutate(after)
+   200→   200→   200→  after.metadata.updatedAt = new Date().toISOString()
+   201→   201→   201→  get().pushHistory({ kind: 'doc', label, before, after })
+   202→   202→   202→  set({ doc: after, dirty: true, structureVersion: get().structureVersion + 1, pixelVersion: get().pixelVersion + 1 })
+   203→   203→   203→}
+   204→   204→   204→
+   205→   205→   205→let setStore: (partial: Partial<EditorState> | ((s: EditorState) => Partial<EditorState>)) => void
+   206→   206→   206→let getStore: () => EditorState
+   207→   207→   207→
+   208→   208→   208→export const useEditorStore = create<EditorState>((set, get) => {
+   209→   209→   209→  setStore = set
+   210→   210→   210→  getStore = get
+   211→   211→   211→  const doc0 = createDocument(32, 32)
+   212→   212→   212→  return {
+   213→   213→   213→    doc: doc0,
+   214→   214→   214→    activeFrameId: doc0.frames[0].id,
+   215→   215→   215→    activeLayerId: doc0.layers[0].id,
+   216→   216→   216→    tool: 'pencil',
+   217→   217→   217→    toolOptions: { ...DEFAULT_TOOL_OPTIONS },
+   218→   218→   218→    primary: '#000000',
+   219→   219→   219→    secondary: '#FFFFFF',
+   220→   220→   220→    recentColors: [],
+   221→   221→   221→    selection: null,
+   222→   222→   222→    floating: null,
+   223→   223→   223→    clipboard: null,
+   224→   224→   224→    view: { zoom: 8, panX: 0, panY: 0 },
+   225→   225→   225→    viewport: { w: 800, h: 600 },
+   226→   226→   226→    gridVisible: true,
+   227→   227→   227→    onionSkin: false,
+   228→   228→   228→    playing: false,
+   229→   229→   229→    pixelVersion: 1,
+   230→   230→   230→    structureVersion: 1,
+   231→   231→   231→    dirty: false,
+   232→   232→   232→    projectId: null,
+   233→   233→   233→    strokeActive: false,
+   234→   234→   234→    strokeButton: 0,
+   235→   235→   235→    strokeAnchor: null,
+   236→   236→   236→    strokeBefore: null,
+   237→   237→   237→    strokeLabel: '',
+   238→   238→   238→    lastPoint: null,
+   239→   239→   239→    previewCel: null,
+   240→   240→   240→    undoStack: [],
+   241→   241→   241→    redoStack: [],
+   242→   242→   242→    historyBytes: 0,
+   243→   243→   243→
+   244→   244→   244→    // ================= document =================
+   245→   245→   245→    newDoc: (w, h, name) => {
+   246→   246→   246→      const d = createDocument(w, h, name)
+   247→   247→   247→      set({
+   248→   248→   248→        doc: d, activeFrameId: d.frames[0].id, activeLayerId: d.layers[0].id,
+   249→   249→   249→        selection: null, floating: null, previewCel: null, dirty: false, projectId: null,
+   250→   250→   250→        undoStack: [], redoStack: [], historyBytes: 0, playing: false,
+   251→   251→   251→        structureVersion: get().structureVersion + 1, pixelVersion: get().pixelVersion + 1,
+   252→   252→   252→      })
+   253→   253→   253→      get().fitToViewport()
+   254→   254→   254→    },
+   255→   255→   255→
+   256→   256→   256→    loadDoc: (d, projectId) => {
+   257→   257→   257→      set({
+   258→   258→   258→        doc: d, activeFrameId: d.frames[0].id, activeLayerId: d.layers[d.layers.length - 1].id,
+   259→   259→   259→        selection: null, floating: null, previewCel: null, dirty: false,
+   260→   260→   260→        projectId: projectId ?? null, undoStack: [], redoStack: [], historyBytes: 0, playing: false,
+   261→   261→   261→        structureVersion: get().structureVersion + 1, pixelVersion: get().pixelVersion + 1,
+   262→   262→   262→      })
+   263→   263→   263→      get().fitToViewport()
+   264→   264→   264→    },
+   265→   265→   265→
+   266→   266→   266→    setDocName: (name) => { set({ doc: { ...get().doc, name }, dirty: true, structureVersion: get().structureVersion + 1 }) },
+   267→   267→   267→    markSaved: (projectId) => set({ dirty: false, projectId: projectId ?? get().projectId }),
+   268→   268→   268→    setBackground: (bg) => snapDoc('Canvas background', (d) => { d.background = bg }),
+   269→   269→   269→
+   270→   270→   270→    resizeCanvas: (w, h, anchor = 'center') => {
+   271→   271→   271→      snapDoc('Resize canvas', (d) => {
+   272→   272→   272→        const ow = d.width, oh = d.height
+   273→   273→   273→        const dx = anchor.includes('w') ? 0 : anchor.includes('e') ? w - ow : Math.floor((w - ow) / 2)
+   274→   274→   274→        const dy = anchor.includes('n') ? 0 : anchor.includes('s') ? h - oh : Math.floor((h - oh) / 2)
+   275→   275→   275→        d.width = w; d.height = h
+   276→   276→   276→        for (const layer of d.layers) {
+   277→   277→   277→          for (const fid of Object.keys(layer.cels)) {
+   278→   278→   278→            const cel = layer.cels[fid]
+   279→   279→   279→            if (!cel) continue
+   280→   280→   280→            const nc = createCel(w, h)
+   281→   281→   281→            for (let y = 0; y < oh; y++) {
+   282→   282→   282→              const ty = y + dy
+   283→   283→   283→              if (ty < 0 || ty >= h) continue
+   284→   284→   284→              for (let x = 0; x < ow; x++) {
+   285→   285→   285→                const tx = x + dx
+   286→   286→   286→                if (tx < 0 || tx >= w) continue
+   287→   287→   287→                const si = (y * ow + x) * 4, di = (ty * w + tx) * 4
+   288→   288→   288→                nc[di] = cel[si]; nc[di + 1] = cel[si + 1]; nc[di + 2] = cel[si + 2]; nc[di + 3] = cel[si + 3]
+   289→   289→   289→              }
+   290→   290→   290→            }
+   291→   291→   291→            layer.cels[fid] = nc
+   292→   292→   292→          }
+   293→   293→   293→        }
+   294→   294→   294→      })
+   295→   295→   295→      set({ selection: null, floating: null, previewCel: null })
+   296→   296→   296→      get().fitToViewport()
+   297→   297→   297→    },
+   298→   298→   298→
+   299→   299→   299→    scaleArtwork: (factor) => {
+   300→   300→   300→      snapDoc('Resize artwork', (d) => {
+   301→   301→   301→        const nw = Math.max(1, Math.round(d.width * factor))
+   302→   302→   302→        const nh = Math.max(1, Math.round(d.height * factor))
+   303→   303→   303→        for (const layer of d.layers) {
+   304→   304→   304→          for (const fid of Object.keys(layer.cels)) {
+   305→   305→   305→            const cel = layer.cels[fid]
+   306→   306→   306→            if (!cel) continue
+   307→   307→   307→            const sc = nearestScale(cel, d.width, d.height, factor)
+   308→   308→   308→            layer.cels[fid] = sc.data
+   309→   309→   309→          }
+   310→   310→   310→        }
+   311→   311→   311→        d.width = nw; d.height = nh
+   312→   312→   312→      })
+   313→   313→   313→      set({ selection: null, floating: null, previewCel: null })
+   314→   314→   314→      get().fitToViewport()
+   315→   315→   315→    },
+   316→   316→   316→
+   317→   317→   317→    cropToContent: () => {
+   318→   318→   318→      const { doc, activeFrameId } = get()
+   319→   319→   319→      const comp = compositeFrame(doc, activeFrameId)
+   320→   320→   320→      const bbox = computeBBox(comp, doc.width, doc.height)
+   321→   321→   321→      if (!bbox) return
+   322→   322→   322→      snapDoc('Trim', (d) => {
+   323→   323→   323→        const { x, y, w, h } = bbox
+   324→   324→   324→        for (const layer of d.layers) {
+   325→   325→   325→          for (const fid of Object.keys(layer.cels)) {
+   326→   326→   326→            const cel = layer.cels[fid]
+   327→   327→   327→            if (!cel) continue
+   328→   328→   328→            layer.cels[fid] = extractRegion(cel, d.width, d.height, { x, y, w, h })
+   329→   329→   329→          }
+   330→   330→   330→        }
+   331→   331→   331→        d.width = w; d.height = h
+   332→   332→   332→      })
+   333→   333→   333→      set({ selection: null, floating: null })
+   334→   334→   334→      get().fitToViewport()
+   335→   335→   335→    },
+   336→   336→   336→
+   337→   337→   337→    cropToSelection: () => {
+   338→   338→   338→      const sel = get().selection
+   339→   339→   339→      if (!sel) return
+   340→   340→   340→      snapDoc('Crop to selection', (d) => {
+   341→   341→   341→        for (const layer of d.layers) {
+   342→   342→   342→          for (const fid of Object.keys(layer.cels)) {
+   343→   343→   343→            const cel = layer.cels[fid]
+   344→   344→   344→            if (!cel) continue
+   345→   345→   345→            layer.cels[fid] = extractRegion(cel, d.width, d.height, sel)
+   346→   346→   346→          }
+   347→   347→   347→        }
+   348→   348→   348→        d.width = sel.w; d.height = sel.h
+   349→   349→   349→      })
+   350→   350→   350→      set({ selection: null, floating: null })
+   351→   351→   351→      get().fitToViewport()
+   352→   352→   352→    },
+   353→   353→   353→
+   354→   354→   354→    // ================= view =================
+   355→   355→   355→    setZoom: (zoom, focus) => {
+   356→   356→   356→      const z = Math.max(0.25, Math.min(32, zoom))
+   357→   357→   357→      const { view } = get()
+   358→   358→   358→      if (focus) {
+   359→   359→   359→        const rx = (focus.x - view.panX) / view.zoom
+   360→   360→   360→        const ry = (focus.y - view.panY) / view.zoom
+   361→   361→   361→        set({ view: { zoom: z, panX: focus.x - rx * z, panY: focus.y - ry * z } })
+   362→   362→   362→      } else {
+   363→   363→   363→        set({ view: { ...view, zoom: z } })
+   364→   364→   364→      }
+   365→   365→   365→    },
+   366→   366→   366→    zoomBy: (factor, focus) => get().setZoom(get().view.zoom * factor, focus),
+   367→   367→   367→    panBy: (dx, dy) => set({ view: { ...get().view, panX: get().view.panX + dx, panY: get().view.panY + dy } }),
+   368→   368→   368→    setPan: (x, y) => set({ view: { ...get().view, panX: x, panY: y } }),
+   369→   369→   369→    setViewport: (w, h) => {
+   370→   370→   370→      const changed = w !== get().viewport.w || h !== get().viewport.h
+   371→   371→   371→      set({ viewport: { w, h } })
+   372→   372→   372→      if (changed && get().view.zoom === get().view.zoom) {
+   373→   373→   373→        // keep canvas visible if it is out of view
+   374→   374→   374→        const { view, doc } = get()
+   375→   375→   375→        const cw = doc.width * view.zoom, ch = doc.height * view.zoom
+   376→   376→   376→        if (view.panX + cw < 0 || view.panY + ch < 0 || view.panX > w || view.panY > h) get().fitToViewport()
+   377→   377→   377→      }
+   378→   378→   378→    },
+   379→   379→   379→    fitToViewport: () => {
+   380→   380→   380→      const { viewport, doc } = get()
+   381→   381→   381→      if (viewport.w < 10 || viewport.h < 10) return
+   382→   382→   382→      const z = Math.max(0.25, Math.min(32, Math.min((viewport.w - 48) / doc.width, (viewport.h - 48) / doc.height)))
+   383→   383→   383→      const snapped = z >= 1 ? Math.max(1, Math.floor(z * 2) / 2) : z
+   384→   384→   384→      set({
+   385→   385→   385→        view: {
+   386→   386→   386→          zoom: snapped,
+   387→   387→   387→          panX: Math.round((viewport.w - doc.width * snapped) / 2),
+   388→   388→   388→          panY: Math.round((viewport.h - doc.height * snapped) / 2),
+   389→   389→   389→        },
+   390→   390→   390→      })
+   391→   391→   391→    },
+   392→   392→   392→    actualSize: () => {
+   393→   393→   393→      const { viewport, doc } = get()
+   394→   394→   394→      set({
+   395→   395→   395→        view: {
+   396→   396→   396→          zoom: 1,
+   397→   397→   397→          panX: Math.round((viewport.w - doc.width) / 2),
+   398→   398→   398→          panY: Math.round((viewport.h - doc.height) / 2),
+   399→   399→   399→        },
+   400→   400→   400→      })
+   401→   401→   401→    },
+   402→   402→   402→    centerCanvas: () => {
+   403→   403→   403→      const { viewport, doc, view } = get()
+   404→   404→   404→      set({ view: { ...view, panX: Math.round((viewport.w - doc.width * view.zoom) / 2), panY: Math.round((viewport.h - doc.height * view.zoom) / 2) } })
+   405→   405→   405→    },
+   406→   406→   406→    setGridVisible: (v) => set({ gridVisible: v }),
+   407→   407→   407→    setOnionSkin: (v) => set({ onionSkin: v, pixelVersion: get().pixelVersion + 1 }),
+   408→   408→   408→    setPlaying: (v) => set({ playing: v }),
+   409→   409→   409→
+   410→   410→   410→    // ================= tools =================
+   411→   411→   411→    setTool: (t) => {
+   412→   412→   412→      if (get().floating) get().commitFloating()
+   413→   413→   413→      set({ tool: t, previewCel: null, strokeActive: false })
+   414→   414→   414→    },
+   415→   415→   415→    setToolOptions: (o) => set({ toolOptions: { ...get().toolOptions, ...o } }),
+   416→   416→   416→    setPrimary: (hex, pushRecent = true) => {
+   417→   417→   417→      const clean = hex.toUpperCase()
+   418→   418→   418→      if (!pushRecent) { set({ primary: clean }); return }
+   419→   419→   419→      const rec = [clean, ...get().recentColors.filter((c) => c !== clean)].slice(0, 24)
+   420→   420→   420→      set({ primary: clean, recentColors: rec })
+   421→   421→   421→    },
+   422→   422→   422→    setSecondary: (hex) => set({ secondary: hex.toUpperCase() }),
+   423→   423→   423→    swapColors: () => set({ primary: get().secondary, secondary: get().primary }),
+   424→   424→   424→    resetColors: () => set({ primary: '#000000', secondary: '#FFFFFF' }),
+   425→   425→   425→
+   426→   426→   426→    // ================= strokes =================
+   427→   427→   427→    canPaint: () => {
+   428→   428→   428→      const { doc, activeLayerId } = get()
+   429→   429→   429→      const layer = doc.layers.find((l) => l.id === activeLayerId)
+   430→   430→   430→      return !!layer && layer.visible && !layer.locked
+   431→   431→   431→    },
+   432→   432→   432→
+   433→   433→   433→    strokeBegin: (x, y, button, _shift) => {
+   434→   434→   434→      const s = get()
+   435→   435→   435→      if (x < 0 || y < 0 || x >= s.doc.width || y >= s.doc.height) return false
+   436→   436→   436→      if (s.floating) s.commitFloating()
+   437→   437→   437→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   438→   438→   438→      if (!layer || !layer.visible || layer.locked) return false
+   439→   439→   439→      const beforeCel = layer.cels[s.activeFrameId] ?? createCel(s.doc.width, s.doc.height)
+   440→   440→   440→      const before = cloneCel(beforeCel)
+   441→   441→   441→      const opts = { pattern: s.toolOptions.pattern, clip: s.selection }
+   442→   442→   442→      const sym = s.toolOptions
+   443→   443→   443→
+   444→   444→   444→      set({
+   445→   445→   445→        strokeActive: true,
+   446→   446→   446→        strokeButton: button,
+   447→   447→   447→        strokeAnchor: { x, y },
+   448→   448→   448→        strokeBefore: before,
+   449→   449→   449→        lastPoint: { x, y },
+   450→   450→   450→        strokeLabel: s.tool,
+   451→   451→   451→      })
+   452→   452→   452→
+   453→   453→   453→      const cel = layer.cels[s.activeFrameId] ?? createCel(s.doc.width, s.doc.height)
+   454→   454→   454→      layer.cels[s.activeFrameId] = cel
+   455→   455→   455→
+   456→   456→   456→      switch (s.tool) {
+   457→   457→   457→        case 'pencil': {
+   458→   458→   458→          const colRgba = hexToRgba(button === 2 ? s.secondary : s.primary)
+   459→   459→   459→          const w = s.doc.width, h = s.doc.height
+   460→   460→   460→          const paintPt = (px: number, py: number) => {
+   461→   461→   461→            const pts: [number, number][] = [[px, py]]
+   462→   462→   462→            if (sym.symmetryH) pts.push([w - 1 - px, py])
+   463→   463→   463→            if (sym.symmetryV) pts.push([px, h - 1 - py])
+   464→   464→   464→            if (sym.symmetryH && sym.symmetryV) pts.push([w - 1 - px, h - 1 - py])
+   465→   465→   465→            for (const [ax, ay] of pts) {
+   466→   466→   466→              const i = (ay * w + ax) * 4
+   467→   467→   467→              if (ax < 0 || ay < 0 || ax >= w || ay >= h) continue
+   468→   468→   468→              if (opts.clip && (ax < opts.clip.x || ay < opts.clip.y || ax >= opts.clip.x + opts.clip.w || ay >= opts.clip.y + opts.clip.h)) continue
+   469→   469→   469→              if (!patternOk(s.toolOptions.pattern, ax, ay)) continue
+   470→   470→   470→              cel[i] = colRgba[0]; cel[i + 1] = colRgba[1]; cel[i + 2] = colRgba[2]; cel[i + 3] = colRgba[3]
+   471→   471→   471→            }
+   472→   472→   472→          }
+   473→   473→   473→          paintPt(x, y)
+   474→   474→   474→          set({ pixelVersion: get().pixelVersion + 1 })
+   475→   475→   475→          return true
+   476→   476→   476→        }
+   477→   477→   477→        case 'eraser': {
+   478→   478→   478→          const w = s.doc.width, h = s.doc.height
+   479→   479→   479→          const paintPt = (px: number, py: number) => {
+   480→   480→   480→            const pts: [number, number][] = [[px, py]]
+   481→   481→   481→            if (sym.symmetryH) pts.push([w - 1 - px, py])
+   482→   482→   482→            if (sym.symmetryV) pts.push([px, h - 1 - py])
+   483→   483→   483→            if (sym.symmetryH && sym.symmetryV) pts.push([w - 1 - px, h - 1 - py])
+   484→   484→   484→            for (const [ax, ay] of pts) {
+   485→   485→   485→              const i = (ay * w + ax) * 4
+   486→   486→   486→              if (ax < 0 || ay < 0 || ax >= w || ay >= h) continue
+   487→   487→   487→              if (opts.clip && (ax < opts.clip.x || ay < opts.clip.y || ax >= opts.clip.x + opts.clip.w || ay >= opts.clip.y + opts.clip.h)) continue
+   488→   488→   488→              cel[i] = 0; cel[i + 1] = 0; cel[i + 2] = 0; cel[i + 3] = 0
+   489→   489→   489→            }
+   490→   490→   490→          }
+   491→   491→   491→          paintPt(x, y)
+   492→   492→   492→          set({ pixelVersion: get().pixelVersion + 1 })
+   493→   493→   493→          return true
+   494→   494→   494→        }
+   495→   495→   495→        case 'bucket': {
+   496→   496→   496→          const col = hexToRgba(button === 2 ? s.secondary : s.primary)
+   497→   497→   497→          floodFill(cel, s.doc.width, s.doc.height, x, y, col, s.toolOptions.tolerance, s.selection)
+   498→   498→   498→          set({ pixelVersion: get().pixelVersion + 1 })
+   499→   499→   499→          return true
+   500→   500→   500→        }
+   501→   501→   501→        case 'replace': {
+   502→   502→   502→          const w = s.doc.width, h = s.doc.height
+   503→   503→   503→          const i = (y * w + x) * 4
+   504→   504→   504→          const from: RGBA = [cel[i], cel[i + 1], cel[i + 2], cel[i + 3]]
+   505→   505→   505→          const to = hexToRgba(button === 2 ? s.secondary : s.primary)
+   506→   506→   506→          replaceColor(cel, w, h, from, to, s.toolOptions.tolerance, s.selection)
+   507→   507→   507→          set({ pixelVersion: get().pixelVersion + 1 })
+   508→   508→   508→          return true
+   509→   509→   509→        }
+   510→   510→   510→        case 'line': case 'rect': case 'ellipse': {
+   511→   511→   511→          const preview = createCel(s.doc.width, s.doc.height)
+   512→   512→   512→          set({ previewCel: preview })
+   513→   513→   513→          return true
+   514→   514→   514→        }
+   515→   515→   515→        case 'eyedropper': {
+   516→   516→   516→          const comp = compositeFrame(s.doc, s.activeFrameId)
+   517→   517→   517→          const i = (y * s.doc.width + x) * 4
+   518→   518→   518→          const hex = '#' + [comp[i], comp[i + 1], comp[i + 2]].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()
+   519→   519→   519→          if (button === 2) s.setSecondary(hex); else s.setPrimary(hex)
+   520→   520→   520→          set({ strokeActive: false })
+   521→   521→   521→          return true
+   522→   522→   522→        }
+   523→   523→   523→        case 'text': {
+   524→   524→   524→          const t = s.toolOptions
+   525→   525→   525→          if (!t.text.trim()) { set({ strokeActive: false }); return false }
+   526→   526→   526→          const res = rasterizeText(s.doc.width, s.doc.height, t.text, t.textFont, t.textSize, x, y, hexToRgba(s.primary))
+   527→   527→   527→          layer.cels[s.activeFrameId] = res.data
+   528→   528→   528→          set({ pixelVersion: get().pixelVersion + 1, strokeActive: false })
+   529→   529→   529→          get().pushHistory({
+   530→   530→   530→            kind: 'pixels', label: 'Text', frameId: s.activeFrameId, layerId: s.activeLayerId,
+   531→   531→   531→            before, after: cloneCel(res.data),
+   532→   532→   532→          })
+   533→   533→   533→          return false
+   534→   534→   534→        }
+   535→   535→   535→        case 'select': {
+   536→   536→   536→          set({ previewCel: null })
+   537→   537→   537→          return true
+   538→   538→   538→        }
+   539→   539→   539→        case 'move': {
+   540→   540→   540→          const sel = s.selection
+   541→   541→   541→          if (sel) {
+   542→   542→   542→            const data = extractRegion(cel, s.doc.width, s.doc.height, sel)
+   543→   543→   543→            clearRegion(cel, s.doc.width, s.doc.height, sel)
+   544→   544→   544→            set({
+   545→   545→   545→              floating: { data, w: sel.w, h: sel.h, x: sel.x, y: sel.y, originBefore: before, frameId: s.activeFrameId, layerId: s.activeLayerId },
+   546→   546→   546→              pixelVersion: get().pixelVersion + 1,
+   547→   547→   547→            })
+   548→   548→   548→            return true
+   549→   549→   549→          }
+   550→   550→   550→          return false
+   551→   551→   551→        }
+   552→   552→   552→        default:
+   553→   553→   553→          return false
+   554→   554→   554→      }
+   555→   555→   555→    },
+   556→   556→   556→
+   557→   557→   557→    strokeMove: (x, y, shift) => {
+   558→   558→   558→      const s = get()
+   559→   559→   559→      if (!s.strokeActive) return
+   560→   560→   560→      const dx = x - (s.lastPoint?.x ?? x), dy = y - (s.lastPoint?.y ?? y)
+   561→   561→   561→      set({ lastPoint: { x, y } })
+   562→   562→   562→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   563→   563→   563→      const w = s.doc.width, h = s.doc.height
+   564→   564→   564→      const opts = { pattern: s.toolOptions.pattern, clip: s.selection }
+   565→   565→   565→
+   566→   566→   566→      if (s.tool === 'move' && s.floating) {
+   567→   567→   567→        set({ floating: { ...s.floating, x: s.floating.x + dx, y: s.floating.y + dy }, pixelVersion: s.pixelVersion + 1 })
+   568→   568→   568→        return
+   569→   569→   569→      }
+   570→   570→   570→      if (s.tool === 'select' && s.strokeAnchor) {
+   571→   571→   571→        const a = s.strokeAnchor
+   572→   572→   572→        set({
+   573→   573→   573→          selection: {
+   574→   574→   574→            x: Math.min(a.x, x), y: Math.min(a.y, y),
+   575→   575→   575→            w: Math.abs(x - a.x) + 1, h: Math.abs(y - a.y) + 1,
+   576→   576→   576→          },
+   577→   577→   577→        })
+   578→   578→   578→        return
+   579→   579→   579→      }
+   580→   580→   580→      if (!layer) return
+   581→   581→   581→      const cel = layer.cels[s.activeFrameId]
+   582→   582→   582→      if (!cel) return
+   583→   583→   583→
+   584→   584→   584→      if (s.tool === 'pencil' || s.tool === 'eraser') {
+   585→   585→   585→        const prev = s.lastPoint
+   586→   586→   586→        const colRgba = s.tool === 'eraser' ? ([0, 0, 0, 0] as RGBA) : hexToRgba(s.strokeButton === 2 ? s.secondary : s.primary)
+   587→   587→   587→        if (prev) {
+   588→   588→   588→          drawLine(cel, w, h, prev.x, prev.y, x, y, colRgba, opts)
+   589→   589→   589→        }
+   590→   590→   590→        set({ pixelVersion: s.pixelVersion + 1 })
+   591→   591→   591→        return
+   592→   592→   592→      }
+   593→   593→   593→      if ((s.tool === 'line' || s.tool === 'rect' || s.tool === 'ellipse') && s.strokeAnchor && s.previewCel) {
+   594→   594→   594→        const a = s.strokeAnchor
+   595→   595→   595→        let ex = x, ey = y
+   596→   596→   596→        if (shift && s.tool === 'line') {
+   597→   597→   597→          const ddx = x - a.x, ddy = y - a.y
+   598→   598→   598→          if (Math.abs(ddx) > Math.abs(ddy) * 2) ey = a.y
+   599→   599→   599→          else if (Math.abs(ddy) > Math.abs(ddx) * 2) ex = a.x
+   600→   600→   600→          else { const m = Math.min(Math.abs(ddx), Math.abs(ddy)); ex = a.x + Math.sign(ddx) * m; ey = a.y + Math.sign(ddy) * m }
+   601→   601→   601→        }
+   602→   602→   602→        const colRgba = hexToRgba(s.strokeButton === 2 ? s.secondary : s.primary)
+   603→   603→   603→        const p = s.previewCel
+   604→   604→   604→        p.fill(0)
+   605→   605→   605→        if (s.tool === 'line') drawLine(p, w, h, a.x, a.y, ex, ey, colRgba, { clip: s.selection })
+   606→   606→   606→        else if (s.tool === 'rect') drawRect(p, w, h, a.x, a.y, ex, ey, colRgba, s.toolOptions.shapeFilled, { clip: s.selection })
+   607→   607→   607→        else drawEllipse(p, w, h, a.x, a.y, ex, ey, colRgba, s.toolOptions.shapeFilled, { clip: s.selection })
+   608→   608→   608→        set({ pixelVersion: s.pixelVersion + 1 })
+   609→   609→   609→      }
+   610→   610→   610→    },
+   611→   611→   611→
+   612→   612→   612→    strokeEnd: (_shift) => {
+   613→   613→   613→      const s = get()
+   614→   614→   614→      if (!s.strokeActive) return
+   615→   615→   615→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   616→   616→   616→      const before = s.strokeBefore
+   617→   617→   617→      set({ strokeActive: false, previewCel: null })
+   618→   618→   618→      if (!layer || !before) return
+   619→   619→   619→      const after = layer.cels[s.activeFrameId]
+   620→   620→   620→      if (!after) return
+   621→   621→   621→
+   622→   622→   622→      if (s.tool === 'select') {
+   623→   623→   623→        if (!s.selection || (s.selection.w <= 0 && s.selection.h <= 0)) set({ selection: null })
+   624→   624→   624→        return
+   625→   625→   625→      }
+   626→   626→   626→      if (s.tool === 'eyedropper' || s.tool === 'pan') return
+   627→   627→   627→      if (s.tool === 'move') return // floating continues to live until commit
+   628→   628→   628→      if (s.tool === 'text') return // already pushed
+   629→   629→   629→
+   630→   630→   630→      let changed = false
+   631→   631→   631→      for (let i = 0; i < before.length; i += 4) {
+   632→   632→   632→        if (before[i] !== after[i] || before[i + 1] !== after[i + 1] || before[i + 2] !== after[i + 2] || before[i + 3] !== after[i + 3]) { changed = true; break }
+   633→   633→   633→      }
+   634→   634→   634→      if (!changed) { set({ strokeBefore: null }); return }
+   635→   635→   635→      get().pushHistory({
+   636→   636→   636→        kind: 'pixels',
+   637→   637→   637→        label: s.tool === 'pencil' ? 'Pencil stroke' : s.tool === 'eraser' ? 'Erase' : s.tool,
+   638→   638→   638→        frameId: s.activeFrameId,
+   639→   639→   639→        layerId: s.activeLayerId,
+   640→   640→   640→        before,
+   641→   641→   641→        after: cloneCel(after),
+   642→   642→   642→      })
+   643→   643→   643→      set({ strokeBefore: null, dirty: true })
+   644→   644→   644→    },
+   645→   645→   645→
+   646→   646→   646→    cancelStroke: () => {
+   647→   647→   647→      const s = get()
+   648→   648→   648→      if (s.strokeBefore) {
+   649→   649→   649→        const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   650→   650→   650→        if (layer) layer.cels[s.activeFrameId] = s.strokeBefore
+   651→   651→   651→      }
+   652→   652→   652→      set({ strokeActive: false, previewCel: null, strokeBefore: null, pixelVersion: s.pixelVersion + 1 })
+   653→   653→   653→    },
+   654→   654→   654→
+   655→   655→   655→    // ================= selection / floating =================
+   656→   656→   656→    setSelection: (r) => set({ selection: r }),
+   657→   657→   657→    selectAll: () => set({ selection: { x: 0, y: 0, w: get().doc.width, h: get().doc.height } }),
+   658→   658→   658→    deselect: () => {
+   659→   659→   659→      const s = get()
+   660→   660→   660→      if (s.floating) s.commitFloating()
+   661→   661→   661→      set({ selection: null })
+   662→   662→   662→    },
+   663→   663→   663→    moveFloating: (dx, dy) => {
+   664→   664→   664→      const f = get().floating
+   665→   665→   665→      if (!f) return
+   666→   666→   666→      set({ floating: { ...f, x: f.x + dx, y: f.y + dy }, pixelVersion: get().pixelVersion + 1 })
+   667→   667→   667→    },
+   668→   668→   668→    commitFloating: () => {
+   669→   669→   669→      const s = get()
+   670→   670→   670→      const f = s.floating
+   671→   671→   671→      if (!f) return
+   672→   672→   672→      const layer = s.doc.layers.find((l) => l.id === f.layerId)
+   673→   673→   673→      if (layer) {
+   674→   674→   674→        const cel = layer.cels[f.frameId] ?? createCel(s.doc.width, s.doc.height)
+   675→   675→   675→        layer.cels[f.frameId] = cel
+   676→   676→   676→        for (let y = 0; y < f.h; y++) {
+   677→   677→   677→          const ty = f.y + y
+   678→   678→   678→          if (ty < 0 || ty >= s.doc.height) continue
+   679→   679→   679→          for (let x = 0; x < f.w; x++) {
+   680→   680→   680→            const tx = f.x + x
+   681→   681→   681→            if (tx < 0 || tx >= s.doc.width) continue
+   682→   682→   682→            const si = (y * f.w + x) * 4
+   683→   683→   683→            if (f.data[si + 3] > 0) {
+   684→   684→   684→              const di = (ty * s.doc.width + tx) * 4
+   685→   685→   685→              cel[di] = f.data[si]; cel[di + 1] = f.data[si + 1]; cel[di + 2] = f.data[si + 2]; cel[di + 3] = f.data[si + 3]
+   686→   686→   686→            }
+   687→   687→   687→          }
+   688→   688→   688→        }
+   689→   689→   689→        const after = cloneCel(cel)
+   690→   690→   690→        let changed = false
+   691→   691→   691→        for (let i = 0; i < after.length; i += 4) {
+   692→   692→   692→          if (f.originBefore[i] !== after[i] || f.originBefore[i + 1] !== after[i + 1] || f.originBefore[i + 2] !== after[i + 2] || f.originBefore[i + 3] !== after[i + 3]) { changed = true; break }
+   693→   693→   693→        }
+   694→   694→   694→        if (changed) {
+   695→   695→   695→          get().pushHistory({ kind: 'pixels', label: 'Move', frameId: f.frameId, layerId: f.layerId, before: f.originBefore, after })
+   696→   696→   696→        }
+   697→   697→   697→      }
+   698→   698→   698→      set({ floating: null, pixelVersion: get().pixelVersion + 1, dirty: true })
+   699→   699→   699→    },
+   700→   700→   700→    cutSelection: () => {
+   701→   701→   701→      const s = get()
+   702→   702→   702→      const sel = s.selection
+   703→   703→   703→      if (!sel) return
+   704→   704→   704→      if (s.floating) {
+   705→   705→   705→        set({ clipboard: { data: cloneCel(s.floating.data), w: s.floating.w, h: s.floating.h }, floating: null, pixelVersion: s.pixelVersion + 1 })
+   706→   706→   706→        return
+   707→   707→   707→      }
+   708→   708→   708→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   709→   709→   709→      const cel = layer?.cels[s.activeFrameId]
+   710→   710→   710→      if (!layer || !cel || layer.locked) return
+   711→   711→   711→      set({ clipboard: { data: extractRegion(cel, s.doc.width, s.doc.height, sel), w: sel.w, h: sel.h } })
+   712→   712→   712→      const before = cloneCel(cel)
+   713→   713→   713→      clearRegion(cel, s.doc.width, s.doc.height, sel)
+   714→   714→   714→      get().pushHistory({ kind: 'pixels', label: 'Cut', frameId: s.activeFrameId, layerId: s.activeLayerId, before, after: cloneCel(cel) })
+   715→   715→   715→      set({ pixelVersion: s.pixelVersion + 1, dirty: true })
+   716→   716→   716→    },
+   717→   717→   717→    copySelection: () => {
+   718→   718→   718→      const s = get()
+   719→   719→   719→      const sel = s.selection
+   720→   720→   720→      if (!sel) return
+   721→   721→   721→      if (s.floating) {
+   722→   722→   722→        set({ clipboard: { data: cloneCel(s.floating.data), w: s.floating.w, h: s.floating.h } })
+   723→   723→   723→        return
+   724→   724→   724→      }
+   725→   725→   725→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   726→   726→   726→      const cel = layer?.cels[s.activeFrameId]
+   727→   727→   727→      if (!cel) return
+   728→   728→   728→      set({ clipboard: { data: extractRegion(cel, s.doc.width, s.doc.height, sel), w: sel.w, h: sel.h } })
+   729→   729→   729→    },
+   730→   730→   730→    pasteClipboard: () => {
+   731→   731→   731→      const s = get()
+   732→   732→   732→      const cb = s.clipboard
+   733→   733→   733→      if (!cb) return
+   734→   734→   734→      const layer = s.doc.layers.find((l) => l.id === s.activeLayerId)
+   735→   735→   735→      if (!layer || layer.locked || !layer.visible) return
+   736→   736→   736→      const cel = layer.cels[s.activeFrameId] ?? createCel(s.doc.width, s.doc.height)
+   737→   737→   737→      layer.cels[s.activeFrameId] = cel
+   738→   738→   738→      const x = s.selection?.x ?? Math.floor((s.doc.width - cb.w) / 2)
+   739→   739→   739→      const y = s.selection?.y ?? Math.floor((s.doc.height - cb.h) / 2)
+   740→   740→   740→      set({
+   741→   741→   741→        floating: { data: cloneCel(cb.data), w: cb.w, h: cb.h, x, y, originBefore: cloneCel(cel), frameId: s.activeFrameId, layerId: s.activeLayerId },
+   742→   742→   742→        selection: { x, y, w: cb.w, h: cb.h },
+   743→   743→   743→        pixelVersion: s.pixelVersion + 1,
+   744→   744→   744→      })
+   745→   745→   745→    },
+   746→   746→   746→    deleteSelection: () => {
+   747→   747→   747→      const s = get()
+   748→   748→   748→      if (s.floating) {
+   749→   749→   749→        set({ floating: null, pixelVersion: s.pixelVersion + 1 })
+
+[showing lines 50-749 of 1136; use offset=750 with limit to continue reading]

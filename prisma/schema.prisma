@@ -1,0 +1,24 @@
+// PixelForge AI — Prisma schema
+// Local SQLite storage for project metadata + serialized project data (.pfa JSON inside `data`).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  name      String
+  width     Int
+  height    Int
+  /// Serialized .pfa project (JSON). API keys are NEVER stored here or anywhere server-side.
+  data      String
+  /// Small PNG data URL preview (128px wide)
+  thumb     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
