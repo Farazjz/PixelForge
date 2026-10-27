@@ -194,3 +194,20 @@ Work Log:
 
 Stage Summary:
 - E2E VERIFIED (agent-browser, 1280×800 + 390×844): ImportDialog via pf:import-file contract (PNG as layer: thumb+toast+dirty); native drop simulation on deepest canvas element → dialog preloaded; 3-frame GIF → "As new frames" mode auto-enabled, imported 3 frames with 120ms delays (Frame 4/4, 480ms ≈8fps in Animation panel); ExportDialog scopes Animated GIF / Frames ZIP / BMP all export with success toasts + honest info lines; Ctrl+S → "Project saved" toast + dirty dot cleared; zero page errors; mobile layout intact; dev.log clean (only benign allowedDevOrigins warning)
+---
+Task ID: 4
+Agent: orchestrator (Z.ai Code)
+Task: Debugging pass + private GitHub release
+
+Work Log:
+- Full audit: bunx tsc (src/ clean; examples//skills/ are sandbox-only and excluded from repo), bun run lint 0 problems, zero console.log/TODO leftovers, no orphan files, no unused engine exports, package deps all referenced
+- BUG FIX 1 (store.ts resizeCanvas): default anchor 'center' matched includes('e')/includes('n') → wrong offsets (dx=w-ow, dy=0). Replaced with endsWith('w'|'e')/startsWith('n'|'s'); verified with a 10-anchor store test (nw..se + center) — all place pixels exactly right
+- BUG FIX 2 (dead event pf:quantize): MenuBar "Reduce Colors…" fired an event nobody handled → ResizeDialog now listens and opens (E2E verified: Image ▸ Reduce Colors… opens Resize & Optimize)
+- BUG FIX 3 (dead event pf:menu-save, from Phase 3): Ctrl+S now downloads .pfa, clears dirty, toasts (E2E verified)
+- Verified lossless .pfa serialize→deserialize roundtrip (pixel-exact, byte-stable); cloud projects API GET/POST 200 against Prisma/SQLite
+- E2E regression (agent-browser): draw+undo, centered resize 32→48×40 (status bar + toast correct), Reduce Colors flow, zero page errors
+- Repo hygiene: gitignored + untracked sandbox artifacts (.env, db/custom.db, tool-results/, .verify-*.png, .zscripts/, tests/, download/, mini-services/, upload/, examples/, Caddyfile); spec preserved at docs/SPECIFICATION.md; added README.md
+- GitHub: created Farazjz/PixelForge via API with private:true (HTTP 201), pushed main (commit 759025c), remote URL stored tokenless; API verification: PRIVATE=True, 129 files, leak scan NONE
+
+Stage Summary:
+- App state: all bugs fixed and E2E-verified; repo at github.com/Farazjz/PixelForge (private)
